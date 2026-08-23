@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.20)
+project(asdf CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(Boost REQUIRED COMPONENTS headers system)
+find_package(Threads REQUIRED)  # required by boost
+
+add_executable(server src/server/server.cpp)
+target_link_libraries(server PRIVATE 
+    Threads::Threads
+    Boost::headers
+    Boost::system
+)
+
+add_executable(client src/client/client.cpp)
+target_link_libraries(client PRIVATE
+    Threads::Threads
+    Boost::headers
+    Boost::system
+)
