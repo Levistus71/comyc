@@ -22,7 +22,7 @@ By decoupling identity from destination and using parallel transport pipelines, 
 * **Client ($U$):**
 Captures system-wide network traffic, serializes raw IP packets into COMYC data cells, applies layered onion encryption, and splits outgoing cells based on traffic data across Entry Relays. Reassembles incoming return streams.
 * **Entry Relays:**
-Stateless intermediate nodes. They receive encrypted cell streams from $U$, strip one layer of encryption, swap circuit identifiers, and forward the cells to Exit Node $C$.
+Stateless intermediate nodes. They receive encrypted cell streams from $U$, strip one layer of encryption, swap circuit identifiers, and forward the cells to Exit Node $C$. They can be clients too, using another batch of entry relays. So $U$ -> user, entry relays -> users, exit relays -> users/hosted by the vpn company.
 * *Knowledge Scope:* The Entry Relays know $U$'s IP address and $C$'s IP address, but **do not know the final destination or packet contents**.
 
 

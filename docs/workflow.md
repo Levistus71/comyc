@@ -18,7 +18,7 @@
 
 * **Step 4: Path Optimization (Top $N$ Entry Node Assignment)**
 * $U$ queries the central directory for the **Top $N$ Entry Relays** (typically $N=2$) matching its latency and bandwidth requirements.
-* The central server returns relay metadata (public IP/port, supported encryption parameters, NAT state) without knowing which Exit Node $C$ or final destination $U$ will ultimately select.
+* The central server returns relay metadata (public IP/port, supported encryption parameters, NAT state) without knowing the final destination $U$ will ultimately select.
 
 ---
 
