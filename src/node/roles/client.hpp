@@ -36,9 +36,11 @@ public:
 
 private:
     auto setup_tun();
-    void start_();
+    void listen_utun();
+    void loop_utun();
 
-    std::thread tun_worker_;
+    std::thread utun_worker_;
+    std::shared_ptr<asio::posix::stream_descriptor> utun_stream_;
     std::atomic<bool> running_ = false;
     std::atomic<int> utun_sockfd_ = -1;
 };

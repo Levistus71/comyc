@@ -1,7 +1,7 @@
 #pragma once
 #include <utility>
 
-namespace UTUN{
+namespace utun{
 
 struct UtunPacket{
     uint32_t os_header;
@@ -13,4 +13,4 @@ std::pair<int,int> dummy_tun();
 void simulate_utun(int write_fd);
 // ! END
 
-} // namespace UTUN
+} // namespace utun

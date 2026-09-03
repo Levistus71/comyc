@@ -15,7 +15,7 @@
 #include <netinet/udp.h>
 #include <netinet/tcp.h>
 
-namespace UTUN{
+namespace utun{
 
 // ! START: remove all these functions, temporarily used by dummy_utun() and simulate_utun()
 
@@ -47,7 +47,7 @@ static void simulate_utun(int write_fd){
         bool tcp = coin_flip(rng);
 
         std::string payload = random_payload(rng);
-        auto pkt = UTUN::build_packet(payload, ipv4, tcp);
+        auto pkt = utun::build_packet(payload, ipv4, tcp);
         
         std::vector<uint8_t> raw_bytes;
         raw_bytes.reserve(sizeof(pkt.os_header) + pkt.raw_packet.size());
@@ -160,4 +160,4 @@ static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp){
 // ! END
 
 
-} // namespace UTUN
+} // namespace utun
