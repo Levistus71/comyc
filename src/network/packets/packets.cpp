@@ -20,39 +20,20 @@
 
 namespace utun{
 
-// bool RawPacket::blocking_listen_utun(asio::posix::stream_descriptor& utun_stream,
-//     std::function<void(boost::system::error_code)> handler)
-// {
-//     if(!parse_macos_header(utun_stream))
-//         return false;
-
-//     if(!parse_ip_header(utun_stream))
-//         return false;
-    
-//     if(!get_payload(utun_stream))
-//         return false;        
-
-//     if(!process_packet())
-//         return false;
-
-//     return true;
-// }
-
-asio::awaitable<void> RawPacket::async_listen_utun(std::shared_ptr<asio::posix::stream_descriptor> utun_stream,
-    std::function<void(boost::system::error_code)> exit_routine)
+bool RawPacket::parse_packet()
 {
-     
+    return parse_macos_header() && parse_headers();
 }
 
 
 
-bool RawPacket::parse_macos_header(asio::posix::stream_descriptor& utun_stream){
-    boost::system::error_code ec;
-    asio::read(utun_stream, asio::buffer(&family_hdr, sizeof(family_hdr)), ec);
-    if(ec){
-        std::cerr << "[Tun Worker] Header read failed: " << ec.message() << std::endl;
+bool RawPacket::parse_macos_header()
+{
+    if(bytes_received<sizeof(family_hdr))
         return false;
-    }
+
+    std::memcpy(&family_hdr, payload.data(), sizeof(family_hdr));
+    family_hdr = ntohl(family_hdr);
 
     if(family_hdr == AF_INET)
         ip_hdr_sz = sizeof(struct ip);
@@ -63,89 +44,65 @@ bool RawPacket::parse_macos_header(asio::posix::stream_descriptor& utun_stream){
         return false;
     }
 
-    return {};
-}
-
-
-bool RawPacket::parse_ip_header(asio::posix::stream_descriptor& utun_stream){
-    boost::system::error_code ec;
-    payload.resize(ip_hdr_sz);
-
-    asio::read(utun_stream, asio::buffer(payload), ec);
-    if(ec){
-        std::cerr << "[Tun Worker] IP header read failed: " << ec.message() << std::endl;
-        return false;
-    }
-
-    if(family_hdr == AF_INET){
-        auto* iph = reinterpret_cast<const struct ip*>(payload.data());
-        total_packet_len = ntohs(iph->ip_len);
-    }
-    else{
-        auto* ip6h = reinterpret_cast<const struct ip6_hdr*>(payload.data());
-        total_packet_len = sizeof(struct ip6_hdr) + ntohs(ip6h->ip6_plen);
-    }
-
     return true;
 }
 
 
-bool RawPacket::get_payload(asio::posix::stream_descriptor& utun_stream){
-    size_t curr_sz = payload.size();
-    boost::system::error_code ec;
-    if(total_packet_len>curr_sz){
-        size_t remaining_bytes = total_packet_len - curr_sz;
-        payload.resize(total_packet_len);
-
-        asio::read(utun_stream, asio::buffer(payload.data() + curr_sz, remaining_bytes), ec);
-
-        if(ec){
-            std::cerr << "[Tun Worker] Payload read failed: " << ec.message() << std::endl;
-            return false;
-        }
-    }
-
-    return true;
-}
-
-
-bool RawPacket::process_packet(){
-    if(payload.empty())
-        return false;
-    
-    if(ip_hdr_sz > payload.size())
+bool RawPacket::parse_headers(){
+    if(bytes_received<sizeof(family_hdr)+ip_hdr_sz)
         return false;
 
+    auto headers_start = payload.data() + sizeof(family_hdr);
+
+    uint8_t protocol = 0;
     std::array<char, INET6_ADDRSTRLEN> src_str{};
     std::array<char, INET6_ADDRSTRLEN> dst_str{};
-    uint8_t protocol = 0;
 
     if(family_hdr == AF_INET){
-        if(payload.size() < sizeof(struct ip))
+        auto* iph = reinterpret_cast<const struct ip*>(headers_start);
+        // while_debug
+        total_packet_len = ntohs(iph->ip_len);  // doubt: might break on macos. don't use nthos for macos.
+
+        ip_hdr_sz = iph->ip_hl * 4; // variable header size
+        if(ip_hdr_sz < 20 || bytes_received < sizeof(family_hdr) + ip_hdr_sz)
             return false;
-        
-        auto* iph = reinterpret_cast<const struct ip*>(payload.data());
-        inet_ntop(AF_INET, &iph->ip_src, src_str.data(), src_str.size());
-        inet_ntop(AF_INET, &iph->ip_dst, dst_str.data(), dst_str.size());
+
+        // ::inet_ntop(AF_INET, &iph->ip_src, src_str.data(), src_str.size());
+        // ::inet_ntop(AF_INET, &iph->ip_dst, dst_str.data(), dst_str.size());
+
+        asio::ip::address_v4::bytes_type src_bytes, dst_bytes;
+        std::memcpy(src_bytes.data(), &iph->ip_src, 4);
+        std::memcpy(dst_bytes.data(), &iph->ip_dst, 4);
+
+        src_addr = asio::ip::address_v4(src_bytes);
+        dest_addr = asio::ip::address_v4(dst_bytes);
+
         protocol = iph->ip_p;
-    } 
-    else if(family_hdr == AF_INET6){
-        if(payload.size() < sizeof(struct ip6_hdr))
-            return false;
-        
-        auto* ip6h = reinterpret_cast<const struct ip6_hdr*>(payload.data());
-        inet_ntop(AF_INET6, &ip6h->ip6_src, src_str.data(), src_str.size());
-        inet_ntop(AF_INET6, &ip6h->ip6_dst, dst_str.data(), dst_str.size());
-        protocol = ip6h->ip6_nxt;
     }
-    else
-        return false;
+    else{
+        auto* ip6h = reinterpret_cast<const struct ip6_hdr*>(headers_start);
+        total_packet_len = sizeof(struct ip6_hdr) + ntohs(ip6h->ip6_plen);
+
+        // ::inet_ntop(AF_INET6, &ip6h->ip6_src, src_str.data(), src_str.size());
+        // ::inet_ntop(AF_INET6, &ip6h->ip6_dst, dst_str.data(), dst_str.size());
+
+        asio::ip::address_v6::bytes_type src_bytes, dst_bytes;
+        std::memcpy(src_bytes.data(), &ip6h->ip6_src, 16);
+        std::memcpy(dst_bytes.data(), &ip6h->ip6_dst, 16);
+
+        src_addr = asio::ip::address_v6(src_bytes);
+        dest_addr = asio::ip::address_v6(dst_bytes);
+        
+        // imp: we don't care about header extensions in ipv6, we drop all those packets
+        // imp: in the protocol == IPPROTO_TCP || UDP check below.
+        protocol = ip6h->ip6_nxt;   // doubt: header extensions
+    }
 
     if(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP){
-        if(payload.size() - ip_hdr_sz < 4)
+        if(bytes_received - ip_hdr_sz - sizeof(family_hdr) < 4)
             return false;
 
-        const auto* p = payload.data() + ip_hdr_sz;
+        const auto* p = payload.data() + ip_hdr_sz + sizeof(family_hdr);
 
         uint16_t src, dst;
         std::memcpy(&src, p, sizeof(src));
@@ -155,17 +112,7 @@ bool RawPacket::process_packet(){
         dest_port = ntohs(dst);
     }
 
-    try{
-        src_addr = boost::asio::ip::make_address(src_str.data());
-        dest_addr = boost::asio::ip::make_address(dst_str.data());
-    }
-    catch (const boost::system::system_error& e) {
-        std::cerr << "[Tun Worker] Failed to get ip information properly: " << e.what() << std::endl;
-        return false;
-    }
-
     return true;
 }
-
 
 }

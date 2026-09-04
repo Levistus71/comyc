@@ -2,8 +2,10 @@
 #include "node/roles/client.hpp"
 #include "node/roles/exit.hpp"
 #include "node/roles/relay.hpp"
-#include <memory>
 
+#include <boost/asio.hpp>
+
+namespace asio = boost::asio;
 
 enum class NodeRole : uint8_t {
     CLIENT = 1 << 0,
@@ -63,4 +65,6 @@ private:
     std::unique_ptr<Client> client_;
     std::unique_ptr<Relay> relay_;
     std::unique_ptr<Exit> exit_;
+
+    asio::io_context ioc_;
 };

@@ -1,5 +1,14 @@
 #pragma once
 
+#include "src/network/packets/packets.hpp"
+
+#include <array>
+#include <deque>
+
+#include <boost/asio.hpp>
+
+namespace asio = boost::asio;
+
 /*
 * Client proc:
 
@@ -26,21 +35,22 @@ what should we communicate with the control_server:
 
 
 
-class Client{
+class Client : public std::enable_shared_from_this<Client>
+{
 public:
-    Client();
+    Client(asio::io_context& ioc);
     ~Client();
 
     void start();
-    auto stop();
+    // auto stop();
 
 private:
-    auto setup_tun();
-    void listen_utun();
-    void loop_utun();
-
-    std::thread utun_worker_;
-    std::shared_ptr<asio::posix::stream_descriptor> utun_stream_;
-    std::atomic<bool> running_ = false;
+    asio::io_context& ioc_;
+    asio::posix::stream_descriptor utun_stream_;
     std::atomic<int> utun_sockfd_ = -1;
+
+    void start_utun();
+    void read_packet(std::shared_ptr<utun::RawPacket> raw_packet);
+    void loop_utun(std::shared_ptr<utun::RawPacket> raw_packet, boost::system::error_code const& ec);
+    void process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet);
 };

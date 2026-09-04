@@ -1,32 +1,36 @@
 #pragma once
+
 #include <cstdint>
+#include <array>
+
 #include <boost/asio.hpp>
-// #include <boost/asio/awaitable.hpp>
 
 namespace asio = boost::asio;
 
 
 namespace utun{
 
+constexpr size_t RAW_PACKET_MAX_SZ = 2000;
 
 class RawPacket{
 public:
-    uint32_t family_hdr = -1;               // 4 byte macos field
-    size_t ip_hdr_sz = -1;
-    size_t total_packet_len = -1;
-    std::vector<uint8_t> payload;
-    asio::ip::address src_addr, dest_addr;
-    uint16_t src_port = -1, dest_port = -1;
+    std::array<uint8_t, RAW_PACKET_MAX_SZ> payload;
+    size_t bytes_received = 0;              // populated by usr
 
-    asio::awaitable<void> async_listen_utun(std::shared_ptr<asio::posix::stream_descriptor> utun_stream, 
-        std::function<void(boost::system::error_code)> handler);
+    uint32_t family_hdr = 0;                // 4 byte macos field
+    size_t ip_hdr_sz = 0;
+    size_t total_packet_len = 0;
+
+    asio::ip::address src_addr;
+    asio::ip::address dest_addr;
+    uint16_t src_port = 0;
+    uint16_t dest_port = 0;
+
+    [[nodiscard]] bool parse_packet();
 
 private:
-    bool parse_macos_header(asio::posix::stream_descriptor& utun_stream);
-    bool parse_ip_header(asio::posix::stream_descriptor& utun_stream);
-    bool get_payload(asio::posix::stream_descriptor& utun_stream);
-    bool process_packet();
-
+    [[nodiscard]] bool parse_macos_header();
+    [[nodiscard]] bool parse_headers();
 };
 
 
