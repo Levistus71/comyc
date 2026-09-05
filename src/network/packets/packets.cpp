@@ -20,14 +20,14 @@
 
 namespace utun{
 
-bool RawPacket::parse_packet()
+[[nodiscard]] bool RawPacket::parse_packet()
 {
     return parse_macos_header() && parse_headers();
 }
 
 
 
-bool RawPacket::parse_macos_header()
+[[nodiscard]] bool RawPacket::parse_macos_header()
 {
     if(bytes_received<sizeof(family_hdr))
         return false;
@@ -48,7 +48,8 @@ bool RawPacket::parse_macos_header()
 }
 
 
-bool RawPacket::parse_headers(){
+[[nodiscard]] bool RawPacket::parse_headers()
+{
     if(bytes_received<sizeof(family_hdr)+ip_hdr_sz)
         return false;
 
@@ -61,7 +62,7 @@ bool RawPacket::parse_headers(){
     if(family_hdr == AF_INET){
         auto* iph = reinterpret_cast<const struct ip*>(headers_start);
         // while_debug
-        total_packet_len = ntohs(iph->ip_len);  // doubt: might break on macos. don't use nthos for macos.
+        total_packet_len = ntohs(iph->ip_len);  // doubt: might break on macos. don't use ntohs for macos.
 
         ip_hdr_sz = iph->ip_hl * 4; // variable header size
         if(ip_hdr_sz < 20 || bytes_received < sizeof(family_hdr) + ip_hdr_sz)

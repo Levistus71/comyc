@@ -67,4 +67,5 @@ private:
     std::unique_ptr<Exit> exit_;
 
     asio::io_context ioc_;
+    asio::ip::udp::socket udp_socket_;
 };

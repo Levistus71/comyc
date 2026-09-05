@@ -15,6 +15,10 @@ enum class PayloadTier : uint8_t {
 // // this macro might lead to deadly bugs and performance inefficiencies later on
 // // #pragma pack(push, 1)       // ? START: Tell compiler not to optimize this to 2^n bytes using padding
 
+using session_id_t = uint32_t;
+using circuit_id_t = uint64_t;
+using sequence_id_t = uint64_t;
+
 /*
 Rules to follow:
 1. if the struct size isn't a multiple of its largest member's alignment requirement (usually 4 or 8), compilers insert trailing padding bytes to align elements in an array of structs.
@@ -24,21 +28,21 @@ Rules to follow:
 
 
 struct TransitHeader{ // Total 16 Bytes
-    uint64_t circuit_id;        // 8 Bytes: Circuit ID, each (client app -> exit) connection has a circuit id
-    uint16_t frame_len;         // 2 Bytes: The size of the PayloadHeader + payload
-    uint16_t flags;             // 2 Bytes: Define later on.
-    PayloadTier payload_tier;   // 1 Byte: Tier (fixed size) of the useful packet at exit, the size of PayloadHeader + (Payload + Padding).
-    uint8_t _reserved__[3];     // 3 Bytes reserved for future expansion
+    circuit_id_t circuit_id;        // 8 Bytes: Circuit ID, each (client app -> exit) connection has a circuit id
+    uint16_t frame_len;             // 2 Bytes: The size of the PayloadHeader + payload
+    uint16_t flags;                 // 2 Bytes: Define later on.
+    PayloadTier payload_tier;       // 1 Byte: Tier (fixed size) of the useful packet at exit, the size of PayloadHeader + (Payload + Padding).
+    uint8_t _reserved__[3];         // 3 Bytes reserved for future expansion
 };
 
 
 struct PayloadHeader{ // Total 16 Bytes
-    uint64_t sequence_id;       // 8 Bytes: Sequence ID, each Circuit ID uses a Sequence ID, for reordering at exit etc.
-    uint16_t ip_protocol;       // 2 Bytes: Identifies the protocol which the underlying client packet follows (like the 4 byte header mac prepends in utun)
-    uint16_t packet_id;         // 2 Bytes: If the packet which is being sent is too large, we split it into many different packets. To distinguish from differnt large packets, we have packet_id
-    uint16_t payload_len;       // 2 Bytes: Actual payload bytes in this cell.
-    uint8_t frag_index;         // 1 Byte: Index of this fragment in the huge packet.
-    uint8_t frag_total;         // 1 Byte: Total number of fragments made from the huge packet.
+    sequence_id_t sequence_id;      // 8 Bytes: Sequence ID, each Circuit ID uses a Sequence ID, for reordering at exit etc.
+    uint16_t ip_protocol;           // 2 Bytes: Identifies the protocol which the underlying client packet follows (like the 4 byte header mac prepends in utun)
+    uint16_t packet_id;             // 2 Bytes: If the packet which is being sent is too large, we split it into many different packets. To distinguish from differnt large packets, we have packet_id
+    uint16_t payload_len;           // 2 Bytes: Actual payload bytes in this cell.
+    uint8_t frag_index;             // 1 Byte: Index of this fragment in the huge packet.
+    uint8_t frag_total;             // 1 Byte: Total number of fragments made from the huge packet.
 };
 
 
@@ -79,7 +83,7 @@ using RelayBoundBuffer = std::variant<
 
 
 struct RelayBoundCell{
-    uint32_t session_id;            // 4 Bytes: for client and relays to figure out which shared key to use if they are connected in multiple circuits
+    session_id_t session_id;            // 4 Bytes: for client and relays to figure out which shared key to use if they are connected in multiple circuits
     RelayBoundBuffer tphdr_payload; // TransitHeader + PayloadHeader + app data aka InnerCell
 };
 
@@ -98,7 +102,7 @@ struct ExitFullCell{
 
 
 struct ClientFullCell{
-    uint32_t session_id;            // unencrypted
+    session_id_t session_id;            // unencrypted
     TransitHeader thdr;             // encrypted using SH_CR
     PayloadHeader phdr;             // encrypted using SH_CR(SH_CE)
     PayloadBuffer payload;          // encrypted using SH_CR(SH_CE)

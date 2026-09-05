@@ -1,11 +1,15 @@
 #pragma once
 
+#include "src/network/packets/cell.hpp"
 #include "src/network/packets/packets.hpp"
 
 #include <array>
 #include <deque>
+#include <vector>
+#include <shared_mutex>
 
 #include <boost/asio.hpp>
+#include <boost/container_hash/hash.hpp> 
 
 namespace asio = boost::asio;
 
@@ -33,12 +37,60 @@ what should we communicate with the control_server:
 
 */
 
+struct NetworkTuple{
+    asio::ip::address src_addr;
+    asio::ip::address dest_addr;
+
+    uint16_t src_port;
+    uint16_t dest_port;
+
+    bool operator==(const NetworkTuple& other) const {
+        return  (src_addr == other.src_addr) && 
+                (dest_addr == other.dest_addr) &&
+                (src_port == other.src_port) &&
+                (dest_port == other.dest_port);
+    }
+};
+
+
+struct RelayInfo{
+    session_id_t session_id;
+    asio::ip::udp::endpoint endpoint;
+    // relay performance
+    // sh_cr
+};
+
+
+struct CircuitInfo{
+    circuit_id_t circuit_id;
+    std::unique_ptr<std::atomic<int>> sequence_id_ptr;
+    std::vector<RelayInfo> relays;  // OPTIMIZE: no vector. use ring buffer (organized by other thread)
+    // sh_ce
+};
+
+
+namespace std{
+    template<>
+    struct hash<NetworkTuple>{
+        std::size_t operator()(const NetworkTuple& tuple) const noexcept {
+            std::size_t seed = 0;
+            
+            boost::hash_combine(seed, std::hash<std::string>{}(tuple.src_addr.to_string()));
+            boost::hash_combine(seed, std::hash<std::string>{}(tuple.dest_addr.to_string()));
+
+            boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.src_port));
+            boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.dest_port));
+            
+            return seed;
+        }
+    };
+}
 
 
 class Client : public std::enable_shared_from_this<Client>
 {
 public:
-    Client(asio::io_context& ioc);
+    Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socket);
     ~Client();
 
     void start();
@@ -46,11 +98,17 @@ public:
 
 private:
     asio::io_context& ioc_;
+    asio::ip::udp::socket& udp_socket_;
     asio::posix::stream_descriptor utun_stream_;
     std::atomic<int> utun_sockfd_ = -1;
+    std::shared_mutex nt_ci_map_lock_;   // OPTIMIZE
+    std::unordered_map<NetworkTuple, CircuitInfo> nt_ci_map_;
+    std::mutex ci_computing_lock_;
+    std::unordered_map<NetworkTuple, std::vector<std::function<void()>>> ci_computing_;
 
     void start_utun();
     void read_packet(std::shared_ptr<utun::RawPacket> raw_packet);
     void loop_utun(std::shared_ptr<utun::RawPacket> raw_packet, boost::system::error_code const& ec);
-    void process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet);
+    asio::awaitable<void> process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet);
+    asio::awaitable<void> make_new_circuit(const NetworkTuple& nt, std::shared_ptr<CircuitInfo>& val);
 };
