@@ -211,6 +211,11 @@ public:
 Generator<int> coroutine_ex(){
     std::cout << "Hello! Doing some work here, produced the value 10!" << std::endl;
     co_yield 10;
+    /*
+    gen.handle.yield_value(10);
+    gen.handle.pc += 8;
+    return;
+    */
 
     std::cout << "Doing some work again, produced the value 20!" << std::endl;
     co_yield 20;
@@ -221,6 +226,9 @@ Generator<int> coroutine_ex(){
 
 void main2(){
     Generator<int> gen = coroutine_ex();
+    /*
+    gen.handle.initial_suspend();
+    */
 
     while(!gen.done()){
         gen.continue_exec();
@@ -271,6 +279,17 @@ Task some_task(){
     std::cout << "[Coroutine] Thread id (Main thread): " << std::this_thread::get_id() << std::endl;
     std::cout << "[Coroutine] Waiting for data to be produced." << std::endl;
     std::string produced_data = co_await MyAwaitable{};
+    /*
+    if(!MyAwaitable.await_ready()){
+        MyAwaitable.await_suspend(Task.handle);
+        Task.pc += 8;
+        return;
+        produced_data = MyAwaitable.await_resume();
+    }
+    else{
+        produced_data = MyAwaitable.await_resume();
+    }
+    */
     std::cout << "[Coroutine] Woke up. THREAD ID: " << std::this_thread::get_id() << std::endl;
     std::cout << "[Coroutine] After the data is produced, function woke up." << std::endl;
     std::cout << "[Coroutine] Produced data : " << produced_data << std::endl;

@@ -27,7 +27,7 @@ Client::Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socket) :
     utun_stream_(ioc_), 
     udp_socket_(udp_socket)
 {
-
+    ci_computing_strand_ = asio::make_strand(ioc_);
 }
 
 Client::~Client()
@@ -127,7 +127,7 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
 
     */
     
-    NetworkTuple key{
+    NetworkTuple nt{
         .src_addr = raw_packet->src_addr,
         .dest_addr = raw_packet->dest_addr,
 
@@ -135,44 +135,48 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
         .dest_port = raw_packet->dest_port,
     };
 
-    std::shared_ptr<CircuitInfo> val = nullptr;
-    {
-        std::shared_lock<std::shared_mutex> read_lock(nt_ci_map_lock_);
-        if(auto it = nt_ci_map_.find(key); it!=nt_ci_map_.end())
-            val = std::make_shared<CircuitInfo>(it->second);
+    auto ci = nt_ci_umap_.get(nt);
+    if(ci==nullptr){
+        ci = co_await make_new_circuit(nt);
     }
+    
+    // further processing
 
-    if(val==nullptr)
-        co_await make_new_circuit(key, val);
 }
 
 
 // multithread_care
-asio::awaitable<void> Client::make_new_circuit(const NetworkTuple& nt, std::shared_ptr<CircuitInfo>& val){
+asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit(const NetworkTuple& nt){
+    co_return co_await asio::co_spawn(
+        ci_computing_strand_, 
+        make_new_circuit_helper(nt), 
+        asio::use_awaitable
+    );
+}
+
+// stranded
+asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(const NetworkTuple& nt){
+
+    // NOT PIONEER PACKETS
+    if(auto it = ci_computing_.find(nt); it!=ci_computing_.end()){
+        auto chan = it->second;
+        co_return co_await chan->async_receive(asio::use_awaitable);
+    }
+    // if already completed when we were competing for the strand
     {
-        std::unique_lock<std::mutex> comp_lock(ci_computing_lock_);
-        if(auto it = ci_computing_.find(nt); it!=ci_computing_.end()){
-            co_await asio::async_initiate<const asio::use_awaitable_t<>, void()>(
-                [me=shared_from_this(), nt](auto handler){
-                    me->ci_computing_[nt].push_back(std::move(handler));
-                    comp_lock.unlock();
-                },
-                asio::use_awaitable
-            );
-            
-            std::shared_lock<std::shared_mutex> read_lock(nt_ci_map_lock_);
-            val = std::make_shared<CircuitInfo>(nt_ci_map_[nt]);
-            co_return;
-        }
-        else{
-            ci_computing_[nt] = {};
+        auto t = nt_ci_umap_.get(nt);
+        if(t!=nullptr){
+            co_return t;
         }
     }
+
+    // PIONEER PACKET
+    ci_computing_[nt] = std::make_shared<CircuitChannel>(ci_computing_strand_.get_inner_executor(), 100);
     
     // TODO: co_await async_compute_ci(nt);
-    CircuitInfo ci{
+    CircuitInfo ci = CircuitInfo{
         .circuit_id = 1232938,
-        .sequence_id_ptr = std::make_unique<std::atomic<int>>(23412),
+        .sequence_id_ptr = std::make_shared<std::atomic<int>>(23412),
         .relays = std::vector<RelayInfo>{
             RelayInfo{
                 .session_id = 12321344,
@@ -180,20 +184,15 @@ asio::awaitable<void> Client::make_new_circuit(const NetworkTuple& nt, std::shar
             }
         }
     };
+    nt_ci_umap_.put(nt,std::move(ci));
+    auto val = nt_ci_umap_.get(nt);
 
-    {
-        std::unique_lock<std::shared_mutex> write_lock(nt_ci_map_lock_);
-        nt_ci_map_[nt] = std::move(ci);
-        val = std::make_shared<CircuitInfo>(nt_ci_map_[nt]);        // OPTIMIZE
+    auto active_chan = std::move(ci_computing_[nt]);
+    ci_computing_.erase(nt);
+    while(active_chan->ready()){
+        active_chan->try_send(boost::system::error_code{}, val);
     }
-    std::vector<std::function<void()>> waiting_handlers;
-    {
-        std::lock_guard<std::mutex> lck(ci_computing_lock_);
-        waiting_handlers = std::move(ci_computing_[nt]);
-        ci_computing_.erase(nt);
-    }
+    active_chan->close();
 
-    for(auto& continuation : waiting_handlers){
-        continuation();
-    }
+    co_return val;
 }

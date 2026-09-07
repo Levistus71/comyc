@@ -62,3 +62,5 @@ asio::awaitable<void> compute_info(PacketInfo& nt){
     }
 }
 ```
+
+* this wouldn't work in multithreaded applications though. pioneer packet could call this handler *AFTER* this pushes the handler onto the map, but *BEFORE* the co_routine frame is set up. so we use asio::experimental::channel to send the val computed by the pioneer packet to all other waiting packets.
