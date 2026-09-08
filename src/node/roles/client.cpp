@@ -148,7 +148,7 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
     
     auto relay = choose_relay(ci);
 
-    auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN;
+    auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN_SZ;
     std::shared_ptr<ClientFullHeaders> headers = std::make_shared<ClientFullHeaders>(ClientFullHeaders{
         .session_id = relay->session_id,
         .thdr{
@@ -171,16 +171,23 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
     size_t outgoing_bytes = sizeof(ClientFullHeaders) + app_internal_bytes;
     std::array<asio::const_buffer, 2> outgoing = {
         asio::buffer(headers.get(), sizeof(ClientFullHeaders)),
-        asio::buffer(raw_packet->payload.data() + FAMILY_HDR_UTUN, app_internal_bytes)
+        asio::buffer(raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes)
     };
 
-    udp_socket_.async_send_to(outgoing,
+    udp_socket_.async_send_to(
+        outgoing,
         relay->endpoint,
-        [outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
-            if(ec)
+        // raw_packet in the lambda to make sure it doesn't get destroyed
+        // ? compiler shouldn't theoretically optimize this packet out of the capture list.
+        [keep_alive = raw_packet, outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
+            if(ec){
                 std::cerr << "[TUN Worker] Send failed: " << ec.message() << std::endl;
-            if(bytes_xfer!=outgoing_bytes)
+                return;
+            }
+            if(bytes_xfer!=outgoing_bytes){
                 std::cerr << "[TUN Worker] Bytes sent mismatch: UDP socket fail?" << std::endl;
+                return;
+            }
         }
     );
 }

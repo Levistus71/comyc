@@ -59,6 +59,20 @@ public:
     void start();
     void stop();
 
+    /*
+        we need to listen for incoming packets and route it to either client or relay
+        
+        proposed idea:
+            if first bit of packet is 0:
+                circuit_id -> node should use relay to forward it to client
+            else:
+                session_id
+                if second bit of packet is 0:
+                    node should deliver packet to client
+                else:
+                    node should use relay to forward it to exit
+    */
+
 private:
     NodeRole role_;
 

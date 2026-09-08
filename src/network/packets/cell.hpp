@@ -54,7 +54,7 @@ static_assert(std::is_trivially_copyable<PayloadHeader>::value, "PayloadHeader i
 
 constexpr size_t TRANSIT_HDR_SZ = sizeof(TransitHeader);
 constexpr size_t PAYLOAD_HDR_SZ = sizeof(PayloadHeader);
-constexpr size_t FAMILY_HDR_UTUN = sizeof(uint32_t);
+constexpr size_t FAMILY_HDR_UTUN_SZ = sizeof(uint32_t);
 
 // // #pragma pack(pop)           // ? END
 
@@ -89,10 +89,10 @@ struct RelayBoundCell{
 };
 
 
-struct ExitBoundCell{
-    TransitHeader thdr;
-    ExitBoundBuffer phdr_payload;   // PayloadHeader + app data aka RawCell
-};
+// struct ExitBoundCell{
+//     TransitHeader thdr;
+//     ExitBoundBuffer phdr_payload;   // PayloadHeader + app data aka RawCell
+// };
 
 
 struct ExitFullCell{
