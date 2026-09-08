@@ -25,7 +25,8 @@ namespace asio = boost::asio;
 Client::Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socket) : 
     ioc_(ioc), 
     utun_stream_(ioc_), 
-    udp_socket_(udp_socket)
+    udp_socket_(udp_socket),
+    ci_computing_strand_(asio::make_strand(ioc_))
 {
     ci_computing_strand_ = asio::make_strand(ioc_);
 }
@@ -42,9 +43,9 @@ Client::~Client()
 void Client::start()
 {
 
-    //* connect_control_server();
+    // todo: connect_control_server();
 
-    //* utun_sockfd_ = setup_tun();
+    // todo: utun_sockfd_ = setup_tun();
 
     // ! START: simulating utun traffic
     int utun_create_fd = -1;
@@ -104,7 +105,12 @@ void Client::loop_utun(std::shared_ptr<utun::RawPacket> raw_packet, boost::syste
     std::shared_ptr<utun::RawPacket> new_raw_packet = std::make_shared<utun::RawPacket>();
     read_packet(new_raw_packet);
     
-    process_raw_packet(raw_packet);
+    // process_raw_packet(raw_packet);
+    asio::co_spawn(
+        ioc_,
+        process_raw_packet(raw_packet),
+        asio::detached
+    );
 }
 
 
@@ -113,7 +119,7 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
 {
     if(!raw_packet->parse_packet()){
         std::cerr << "[Tun Worker] Dropping faulty packet." << std::endl;
-        return;
+        co_return;
     }
 
     // map: {source_ip, source_port, destination_ip, destination_port} : {circuit_id, sequence_id}
@@ -140,8 +146,43 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
         ci = co_await make_new_circuit(nt);
     }
     
-    // further processing
+    auto relay = choose_relay(ci);
 
+    auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN;
+    std::shared_ptr<ClientFullHeaders> headers = std::make_shared<ClientFullHeaders>(ClientFullHeaders{
+        .session_id = relay->session_id,
+        .thdr{
+            .circuit_id = ci->circuit_id,
+            .frame_len = 1,
+            .flags = 0,
+            .payload_tier = PayloadTier::TIER_1024
+        },
+        .phdr{
+            .sequence_id = (*ci->sequence_id_ptr)++,
+            .ip_protocol = 0,
+            .packet_id = 0,
+            .payload_len = static_cast<uint16_t>(app_internal_bytes),
+            .frag_index = 0,
+            .frag_total = 0
+        }
+    });
+
+    // todo: encrypt sh_ce, sh_cr
+    size_t outgoing_bytes = sizeof(ClientFullHeaders) + app_internal_bytes;
+    std::array<asio::const_buffer, 2> outgoing = {
+        asio::buffer(headers.get(), sizeof(ClientFullHeaders)),
+        asio::buffer(raw_packet->payload.data() + FAMILY_HDR_UTUN, app_internal_bytes)
+    };
+
+    udp_socket_.async_send_to(outgoing,
+        relay->endpoint,
+        [outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
+            if(ec)
+                std::cerr << "[TUN Worker] Send failed: " << ec.message() << std::endl;
+            if(bytes_xfer!=outgoing_bytes)
+                std::cerr << "[TUN Worker] Bytes sent mismatch: UDP socket fail?" << std::endl;
+        }
+    );
 }
 
 
@@ -176,12 +217,12 @@ asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(co
     // TODO: co_await async_compute_ci(nt);
     CircuitInfo ci = CircuitInfo{
         .circuit_id = 1232938,
-        .sequence_id_ptr = std::make_shared<std::atomic<int>>(23412),
-        .relays = std::vector<RelayInfo>{
-            RelayInfo{
+        .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(23412),
+        .relays = std::vector<std::shared_ptr<RelayInfo>>{
+            std::make_shared<RelayInfo>(RelayInfo{
                 .session_id = 12321344,
                 .endpoint = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 6000),
-            }
+            })
         }
     };
     nt_ci_umap_.put(nt,std::move(ci));
@@ -195,4 +236,10 @@ asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(co
     active_chan->close();
 
     co_return val;
+}
+
+
+std::shared_ptr<RelayInfo> Client::choose_relay(std::shared_ptr<CircuitInfo> ci){
+    // TODO: scheduling
+    return ci->relays[0];
 }

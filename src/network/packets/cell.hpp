@@ -54,6 +54,7 @@ static_assert(std::is_trivially_copyable<PayloadHeader>::value, "PayloadHeader i
 
 constexpr size_t TRANSIT_HDR_SZ = sizeof(TransitHeader);
 constexpr size_t PAYLOAD_HDR_SZ = sizeof(PayloadHeader);
+constexpr size_t FAMILY_HDR_UTUN = sizeof(uint32_t);
 
 // // #pragma pack(pop)           // ? END
 
@@ -106,4 +107,11 @@ struct ClientFullCell{
     TransitHeader thdr;             // encrypted using SH_CR
     PayloadHeader phdr;             // encrypted using SH_CR(SH_CE)
     PayloadBuffer payload;          // encrypted using SH_CR(SH_CE)
+};
+
+
+struct ClientFullHeaders{
+    session_id_t session_id;
+    TransitHeader thdr;
+    PayloadHeader phdr;
 };

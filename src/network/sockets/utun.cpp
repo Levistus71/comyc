@@ -19,6 +19,8 @@ namespace utun{
 
 // ! START: remove all these functions, temporarily used by dummy_utun() and simulate_utun()
 
+static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp);
+
 static std::string random_payload(std::mt19937& rng, size_t min_len = 1300, size_t max_len = 1700) {
     static std::string_view chars = 
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()";
@@ -36,7 +38,7 @@ static std::string random_payload(std::mt19937& rng, size_t min_len = 1300, size
     return result;
 }
 
-static void simulate_utun(int write_fd){
+void simulate_utun(int write_fd){
     std::cout << "[Simulated System] Started writing TUN frames." << std::endl;
     
     std::mt19937 rng(std::random_device{}());
@@ -152,7 +154,8 @@ static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp){
     std::memcpy(data_start, data.data(), data.size());
 
     return UtunPacket{
-        .os_header = static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6),
+        // .os_header = static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6),
+        .os_header = htonl(static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6)),
         .raw_packet = std::move(packet)
     };
 }

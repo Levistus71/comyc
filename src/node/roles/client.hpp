@@ -65,8 +65,8 @@ struct RelayInfo{
 
 struct CircuitInfo{
     circuit_id_t circuit_id;
-    std::shared_ptr<std::atomic<int>> sequence_id_ptr;
-    std::vector<RelayInfo> relays;  // OPTIMIZE: no vector. use ring buffer (organized by other thread)
+    std::shared_ptr<std::atomic<sequence_id_t>> sequence_id_ptr;
+    std::vector<std::shared_ptr<RelayInfo>> relays;  // OPTIMIZE: no vector. use ring buffer (organized by other thread)
     // sh_ce
 };
 
@@ -119,4 +119,5 @@ private:
     asio::awaitable<void> process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet);
     asio::awaitable<std::shared_ptr<CircuitInfo>> make_new_circuit(const NetworkTuple& nt);
     asio::awaitable<std::shared_ptr<CircuitInfo>> make_new_circuit_helper(const NetworkTuple& nt);
+    std::shared_ptr<RelayInfo> choose_relay(std::shared_ptr<CircuitInfo> ci);
 };
