@@ -19,7 +19,7 @@ Caveat: We can't write the APP_Internal to the socket (connect() etc). We need t
 
 class Exit{
 public:
-
+    void process_incoming_packet(std::shared_ptr<IncomingCell> packet);
 
 private:
 };

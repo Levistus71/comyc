@@ -3,6 +3,7 @@
 #include "src/network/packets/cell.hpp"
 #include "src/network/packets/packets.hpp"
 #include "src/node/node_utils.hpp"
+#include "src/node/node.hpp"
 
 #include <array>
 #include <deque>
@@ -103,11 +104,15 @@ public:
     void start();
     // auto stop();
 
+    void process_incoming_packet(std::shared_ptr<IncomingCell> packet);
+
 private:
     asio::io_context& ioc_;
     asio::ip::udp::socket& udp_socket_;
+
     asio::posix::stream_descriptor utun_stream_;
     std::atomic<int> utun_sockfd_ = -1;
+
     RCU_UMap<NetworkTuple, CircuitInfo> nt_ci_umap_;
     asio::strand<asio::io_context::executor_type> ci_computing_strand_;
     std::unordered_map<NetworkTuple, std::shared_ptr<CircuitChannel>> ci_computing_;    // stranded

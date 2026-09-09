@@ -12,6 +12,14 @@ enum class PayloadTier : uint8_t {
     TIER_1024 = 3
 };
 
+enum class RoutingFlag : uint8_t {
+    CLIENT_TO_RELAY = 0,
+    RELAY_TO_EXIT = 1,
+    EXIT_TO_RELAY = 2,
+    RELAY_TO_CLIENT = 3,
+    INVALID = 4
+};
+
 // // this macro might lead to deadly bugs and performance inefficiencies later on
 // // #pragma pack(push, 1)       // ? START: Tell compiler not to optimize this to 2^n bytes using padding
 
@@ -84,6 +92,7 @@ using RelayBoundBuffer = std::variant<
 
 
 struct RelayBoundCell{
+    RoutingFlag route_flag;
     session_id_t session_id;            // 4 Bytes: for client and relays to figure out which shared key to use if they are connected in multiple circuits
     RelayBoundBuffer tphdr_payload; // TransitHeader + PayloadHeader + app data aka InnerCell
 };
@@ -96,6 +105,7 @@ struct RelayBoundCell{
 
 
 struct ExitFullCell{
+    RoutingFlag route_flag;
     TransitHeader thdr;
     PayloadHeader phdr;
     PayloadBuffer payload;          // app data
@@ -103,6 +113,7 @@ struct ExitFullCell{
 
 
 struct ClientFullCell{
+    RoutingFlag route_flag;
     session_id_t session_id;            // unencrypted
     TransitHeader thdr;             // encrypted using SH_CR
     PayloadHeader phdr;             // encrypted using SH_CR(SH_CE)
@@ -111,6 +122,7 @@ struct ClientFullCell{
 
 
 struct ClientFullHeaders{
+    RoutingFlag route_flag;
     session_id_t session_id;
     TransitHeader thdr;
     PayloadHeader phdr;

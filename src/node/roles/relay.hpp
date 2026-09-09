@@ -1,5 +1,6 @@
 #pragma once
 
+#include "src/node/node.hpp"
 #include "src/node/node_utils.hpp"
 #include "src/network/packets/cell.hpp"
 
@@ -7,14 +8,6 @@
 #include <variant>
 
 namespace asio = boost::asio;
-
-constexpr size_t ExitBoundCell_MAX_SZ = 2000;
-
-struct RelayCell{
-    size_t bytes_received;
-    std::variant<session_id_t,circuit_id_t> id;
-    std::array<uint8_t, ExitBoundCell_MAX_SZ> payload;
-};
 
 
 struct ExitInfo{
@@ -39,8 +32,8 @@ public:
     void start();
     // auto stop();
 
-    asio::awaitable<void> forward_packet_exit(std::shared_ptr<RelayCell> packet);
-    asio::awaitable<void> forward_packet_client(std::shared_ptr<RelayCell> packet);
+    asio::awaitable<void> forward_to_exit(std::shared_ptr<IncomingCell> packet);
+    asio::awaitable<void> forward_to_client(std::shared_ptr<IncomingCell> packet);
 
 private:
     asio::io_context& ioc_;

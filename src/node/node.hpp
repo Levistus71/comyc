@@ -2,6 +2,7 @@
 #include "node/roles/client.hpp"
 #include "node/roles/exit.hpp"
 #include "node/roles/relay.hpp"
+#include "network/packets/cell.hpp"
 
 #include <boost/asio.hpp>
 
@@ -52,7 +53,25 @@ assign role (client/client+relay)
 
 */
 
-class Node{
+
+constexpr size_t CELL_MAX_SZ = 2000;
+
+
+struct IncomingCell{
+    size_t bytes_received = 0;
+    size_t outgoing_bytes = 0;
+    size_t payload_bytes = 0;
+
+    RoutingFlag route_flag = RoutingFlag::INVALID;
+    size_t start_offset = 0;
+
+    session_id_t sid = 0;
+    circuit_id_t cid = 0;
+    std::array<uint8_t, CELL_MAX_SZ> payload;
+};
+
+class Node : std::enable_shared_from_this<Node>
+{
 public:
     Node();
     
@@ -76,10 +95,17 @@ public:
 private:
     NodeRole role_;
 
-    std::unique_ptr<Client> client_;
-    std::unique_ptr<Relay> relay_;
-    std::unique_ptr<Exit> exit_;
+    std::shared_ptr<Client> client_;
+    std::shared_ptr<Relay> relay_;
+    std::shared_ptr<Exit> exit_;
 
     asio::io_context ioc_;
     asio::ip::udp::socket udp_socket_;
+
+    asio::ip::udp::endpoint listening_endpoint_;
+
+
+    void listen(std::shared_ptr<IncomingCell> packet);
+    void loop_listen(std::shared_ptr<IncomingCell> packet, const boost::system::error_code& ec);
+    void route_packet(std::shared_ptr<IncomingCell> packet);
 };

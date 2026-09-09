@@ -150,6 +150,7 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
 
     auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN_SZ;
     std::shared_ptr<ClientFullHeaders> headers = std::make_shared<ClientFullHeaders>(ClientFullHeaders{
+        .route_flag = RoutingFlag::CLIENT_TO_RELAY,
         .session_id = relay->session_id,
         .thdr{
             .circuit_id = ci->circuit_id,
@@ -177,9 +178,9 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
     udp_socket_.async_send_to(
         outgoing,
         relay->endpoint,
-        // raw_packet in the lambda to make sure it doesn't get destroyed
+        // raw_packet and headers in the lambda to make sure it doesn't get destroyed
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [keep_alive = raw_packet, outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
+        [keep_alive1 = raw_packet, keep_alive2 = headers, outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
             if(ec){
                 std::cerr << "[TUN Worker] Send failed: " << ec.message() << std::endl;
                 return;
