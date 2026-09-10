@@ -18,11 +18,11 @@ void Node::start(){
 
 
 void Node::listen(std::shared_ptr<IncomingCell> packet){
-    asio::ip::udp::endpoint ignore;
+    auto ignore = std::make_shared<asio::ip::udp::endpoint>();
     udp_socket_.async_receive_from(
         asio::buffer(packet->payload),
-        ignore,
-        [me=shared_from_this(), packet](const boost::system::error_code& ec, size_t bytes_received){
+        (*ignore),
+        [me=shared_from_this(), packet, keep_alive = ignore](const boost::system::error_code& ec, const size_t bytes_received){
             packet->bytes_received = bytes_received;
             me->loop_listen(packet, ec);
         }

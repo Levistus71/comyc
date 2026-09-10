@@ -49,15 +49,15 @@ void simulate_utun(const int write_fd){
         bool tcp = coin_flip(rng);
 
         std::string payload = random_payload(rng);
-        auto pkt = utun::build_packet(payload, ipv4, tcp);
+        auto [os_header, raw_packet] = utun::build_packet(payload, ipv4, tcp);
         
         std::vector<uint8_t> raw_bytes;
-        raw_bytes.reserve(sizeof(pkt.os_header) + pkt.raw_packet.size());
+        raw_bytes.reserve(sizeof(os_header) + raw_packet.size());
         
-        const auto* hdr_ptr = reinterpret_cast<const uint8_t*>(&pkt.os_header);
-        raw_bytes.insert(raw_bytes.end(), hdr_ptr, hdr_ptr + sizeof(pkt.os_header));
+        const auto* hdr_ptr = reinterpret_cast<const uint8_t*>(&os_header);
+        raw_bytes.insert(raw_bytes.end(), hdr_ptr, hdr_ptr + sizeof(os_header));
         
-        raw_bytes.insert(raw_bytes.end(), pkt.raw_packet.begin(), pkt.raw_packet.end());
+        raw_bytes.insert(raw_bytes.end(), raw_packet.begin(), raw_packet.end());
 
         ssize_t bytes_sent = send(write_fd, raw_bytes.data(), raw_bytes.size(), 0);
         if (bytes_sent < 0) {

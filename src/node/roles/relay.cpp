@@ -26,7 +26,7 @@ outgoing packet:
     route_flag
     {thdr, phdr, payload}
 */
-[[nodiscard]] bool parse_packet_from_client(std::shared_ptr<IncomingCell> packet){
+[[nodiscard]] static bool parse_packet_from_client(std::shared_ptr<IncomingCell> packet){
     if(packet->bytes_received<sizeof(RoutingFlag)+sizeof(session_id_t)){
         return false;
     }
@@ -49,7 +49,7 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
         std::cerr << "[Relay] Dropping faulty packet, route_packet, size<5." << std::endl;
         co_return;
     }
-    
+
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
     if(exit_info==nullptr){
         std::cerr << "[Relay] Dropping invalid packet, no session_id map found." << std::endl;
@@ -98,7 +98,7 @@ outgoing packet:
     session_id
     {thdr, phdr, payload}
 */
-[[nodiscard]] bool parse_packet_from_exit(std::shared_ptr<IncomingCell> packet){
+[[nodiscard]] static bool parse_packet_from_exit(std::shared_ptr<IncomingCell> packet){
     if(packet->bytes_received<sizeof(RoutingFlag)+sizeof(circuit_id_t)){
         return false;
     }
