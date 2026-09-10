@@ -1,8 +1,6 @@
 #pragma once
 
-#include <cstdint>
 #include <array>
-
 #include <boost/asio.hpp>
 
 namespace asio = boost::asio;

@@ -1,22 +1,10 @@
-#include "network/packets/packets.hpp"
-
+#include "src/network/packets/packets.hpp"
 #include <iostream>
-#include <vector>
 #include <string>
-#include <thread>
 #include <random>
-#include <unistd.h>
-
 #include <boost/asio.hpp>
-#include <boost/asio/awaitable.hpp>
-
-#include <arpa/inet.h>
-
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
-
-#include <netinet/udp.h>
-#include <netinet/tcp.h>
 
 namespace utun{
 
@@ -56,8 +44,6 @@ namespace utun{
     auto headers_start = payload.data() + sizeof(family_hdr);
 
     uint8_t protocol = 0;
-    std::array<char, INET6_ADDRSTRLEN> src_str{};
-    std::array<char, INET6_ADDRSTRLEN> dst_str{};
 
     if(family_hdr == AF_INET){
         auto* iph = reinterpret_cast<const struct ip*>(headers_start);

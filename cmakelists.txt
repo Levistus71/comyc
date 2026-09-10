@@ -1,22 +1,32 @@
 cmake_minimum_required(VERSION 3.20)
-project(asdf CXX)
+project(Comyc LANGUAGES CXX)
+
+if(POLICY CMP0167)
+    cmake_policy(SET CMP0167 NEW)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Boost REQUIRED COMPONENTS headers system)
 find_package(Threads REQUIRED)  # required by boost
 
-add_executable(server src/server/server.cpp)
-target_link_libraries(server PRIVATE 
-    Threads::Threads
-    Boost::headers
-    Boost::system
-)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(client src/client/client.cpp)
-target_link_libraries(client PRIVATE
-    Threads::Threads
-    Boost::headers
-    Boost::system
+# NETWORK
+add_library(network
+        src/network/packets/packets.cpp
+        src/network/sockets/utun.cpp
 )
+target_link_libraries(network PRIVATE encryption Boost::headers)
+
+# NODE APP
+add_executable(node_app
+        src/node/main.cpp
+        src/node/node.cpp
+        src/node/roles/client.cpp
+        src/node/roles/relay.cpp
+)
+set_target_properties(node_app PROPERTIES OUTPUT_NAME "node")
+target_link_libraries(node_app PRIVATE network Boost::headers)

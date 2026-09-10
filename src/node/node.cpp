@@ -12,7 +12,7 @@ Node::Node() :
 
 void Node::start(){
 
-    std::shared_ptr<IncomingCell> first_packet = std::make_shared<IncomingCell>();
+    auto first_packet = std::make_shared<IncomingCell>();
     listen(first_packet);
 }
 

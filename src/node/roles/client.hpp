@@ -5,8 +5,6 @@
 #include "src/node/node_utils.hpp"
 #include "src/node/node.hpp"
 
-#include <array>
-#include <deque>
 #include <vector>
 #include <shared_mutex>
 
@@ -72,22 +70,20 @@ struct CircuitInfo{
 };
 
 
-namespace std{
-    template<>
-    struct hash<NetworkTuple>{
-        std::size_t operator()(const NetworkTuple& tuple) const noexcept {
-            std::size_t seed = 0;
+template<>
+struct std::hash<NetworkTuple>{
+    std::size_t operator()(const NetworkTuple& tuple) const noexcept {
+        std::size_t seed = 0;
             
-            boost::hash_combine(seed, std::hash<std::string>{}(tuple.src_addr.to_string()));
-            boost::hash_combine(seed, std::hash<std::string>{}(tuple.dest_addr.to_string()));
+        boost::hash_combine(seed, std::hash<std::string>{}(tuple.src_addr.to_string()));
+        boost::hash_combine(seed, std::hash<std::string>{}(tuple.dest_addr.to_string()));
 
-            boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.src_port));
-            boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.dest_port));
+        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.src_port));
+        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.dest_port));
             
-            return seed;
-        }
-    };
-}
+        return seed;
+    }
+};
 
 
 // ! experimental features: channel

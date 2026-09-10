@@ -1,5 +1,4 @@
 #pragma once
-#include <cstdint>
 #include <type_traits>
 #include <variant>
 #include <array>
@@ -40,7 +39,7 @@ struct TransitHeader{ // Total 16 Bytes
     uint16_t frame_len;             // 2 Bytes: The size of the PayloadHeader + payload
     uint16_t flags;                 // 2 Bytes: Define later on.
     PayloadTier payload_tier;       // 1 Byte: Tier (fixed size) of the useful packet at exit, the size of PayloadHeader + (Payload + Padding).
-    uint8_t _reserved__[3];         // 3 Bytes reserved for future expansion
+    uint8_t _reserved_[3];         // 3 Bytes reserved for future expansion
 };
 
 
@@ -57,8 +56,8 @@ struct PayloadHeader{ // Total 16 Bytes
 static_assert(sizeof(TransitHeader) == 16, "TransitHeader layout broken");
 static_assert(sizeof(PayloadHeader) == 16, "PayloadHeader layout broken");
 
-static_assert(std::is_trivially_copyable<TransitHeader>::value, "TransitHeader is not memcpy safe");
-static_assert(std::is_trivially_copyable<PayloadHeader>::value, "PayloadHeader is not memcpy safe");
+static_assert(std::is_trivially_copyable_v<TransitHeader>, "TransitHeader is not memcpy safe");
+static_assert(std::is_trivially_copyable_v<PayloadHeader>, "PayloadHeader is not memcpy safe");
 
 constexpr size_t TRANSIT_HDR_SZ = sizeof(TransitHeader);
 constexpr size_t PAYLOAD_HDR_SZ = sizeof(PayloadHeader);

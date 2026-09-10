@@ -1,4 +1,4 @@
-#include "network/sockets/utun.hpp"
+#include "src/network/sockets/utun.hpp"
 
 #include <iostream>
 #include <vector>
@@ -38,7 +38,7 @@ static std::string random_payload(std::mt19937& rng, size_t min_len = 1300, size
     return result;
 }
 
-void simulate_utun(int write_fd){
+void simulate_utun(const int write_fd){
     std::cout << "[Simulated System] Started writing TUN frames." << std::endl;
     
     std::mt19937 rng(std::random_device{}());
@@ -54,7 +54,7 @@ void simulate_utun(int write_fd){
         std::vector<uint8_t> raw_bytes;
         raw_bytes.reserve(sizeof(pkt.os_header) + pkt.raw_packet.size());
         
-        const uint8_t* hdr_ptr = reinterpret_cast<const uint8_t*>(&pkt.os_header);
+        const auto* hdr_ptr = reinterpret_cast<const uint8_t*>(&pkt.os_header);
         raw_bytes.insert(raw_bytes.end(), hdr_ptr, hdr_ptr + sizeof(pkt.os_header));
         
         raw_bytes.insert(raw_bytes.end(), pkt.raw_packet.begin(), pkt.raw_packet.end());

@@ -11,14 +11,6 @@
 
 #include <boost/asio.hpp>
 
-#include <arpa/inet.h>
-
-#include <netinet/ip.h>
-#include <netinet/ip6.h>
-
-#include <netinet/udp.h>
-#include <netinet/tcp.h>
-
 namespace asio = boost::asio;
 
 
@@ -52,10 +44,10 @@ void Client::start()
     try{
         std::tie(utun_create_fd, utun_sockfd_) = utun::dummy_tun();
     }
-    catch(const std::runtime_error& e){
+    catch([[maybe_unused]] const std::runtime_error& e){
         return;
     }
-    
+
     std::thread worker(utun::simulate_utun, utun_create_fd);
     if(worker.joinable())
         worker.detach();
@@ -68,10 +60,8 @@ void Client::start()
 void Client::start_utun()
 {
     boost::system::error_code ec;
-    
-    utun_stream_.assign(utun_sockfd_, ec);
 
-    if(ec){
+    if(utun_stream_.assign(utun_sockfd_, ec)){
         std::cerr << "[Tun Worker] Failed to convert utun_sockfd_ to asio stream_descriptor" << std::endl;
         return;
     }

@@ -38,16 +38,10 @@ RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::RCU_UMap(){
 
 template<class Key, class Val, class Hash, class KeyEqual, class Allocator>
 std::shared_ptr<Val> RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::get(const Key& k){
-    auto local_umap = umap_.load();
-
-    if(local_umap){
+    if(auto local_umap = umap_.load()){
         auto it = local_umap->find(k);
         if(it!=local_umap->end()){
-            // return std::shared_ptr<Val>(local_umap, const_cast<Val*>(&it->second));
-            return std::shared_ptr<Val>(
-                const_cast<Val*>(&it->second), 
-                [local_umap](Val*) {}
-            );
+            return std::shared_ptr<Val>(local_umap, const_cast<Val*>(&it->second));
         }
     }
     return nullptr;

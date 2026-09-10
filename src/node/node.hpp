@@ -1,8 +1,8 @@
 #pragma once
-#include "node/roles/client.hpp"
-#include "node/roles/exit.hpp"
-#include "node/roles/relay.hpp"
-#include "network/packets/cell.hpp"
+#include "src/node/roles/client.hpp"
+#include "src/node/roles/exit.hpp"
+#include "src/node/roles/relay.hpp"
+#include "src/network/packets/cell.hpp"
 
 #include <boost/asio.hpp>
 
@@ -80,7 +80,7 @@ public:
 
     /*
         we need to listen for incoming packets and route it to either client or relay
-        
+
         proposed idea:
             if first bit of packet is 0:
                 circuit_id -> node should use relay to forward it to client

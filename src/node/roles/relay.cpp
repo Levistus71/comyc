@@ -9,9 +9,7 @@ Relay::Relay(asio::io_context& ioc, asio::ip::udp::socket& sock):
 
 }
 
-Relay::~Relay(){
-
-}
+Relay::~Relay()= default;
 
 
 void Relay::start(){
@@ -109,7 +107,7 @@ outgoing packet:
     size_t loops = sizeof(circuit_id_t)/sizeof(uint8_t);
     for(size_t i=0;i<loops;i++){
         uint8_t byte = static_cast<circuit_id_t>(packet->payload[i+1]);
-        int shift = 8 * (loops-i-1);
+        size_t shift = 8 * (loops-i-1);
         packet->cid |= (byte << shift);
     }
     
