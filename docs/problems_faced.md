@@ -1,6 +1,7 @@
 ## 1. Async Thundering Herd problem
 
 sample code:
+
 ```
 void User::process_raw_packet(std::shared_ptr<RawPacket> raw_packet){
     PacketInfo& nt = raw_packet->nt;        // assume packet info only has destination_address
@@ -23,10 +24,11 @@ compute_info(PacketInfo& nt){
 }
 ```
 
-* we don't want to duplicate the compute_packet_info(nt) work.
+* we don't want to duplicate the compute_packet_info (nt) work.
 * this is called the "thundering herd problem" it seems.
 
 solution:
+
 ```
 asio::awaitable<void> User::process_raw_packet(std::shared_ptr<RawPacket> raw_packet){
     PacketInfo& nt = raw_packet->nt;
@@ -63,4 +65,6 @@ asio::awaitable<void> compute_info(PacketInfo& nt){
 }
 ```
 
-* this wouldn't work in multithreaded applications though. pioneer packet could call this handler *AFTER* this pushes the handler onto the map, but *BEFORE* the co_routine frame is set up. so we use asio::experimental::channel to send the val computed by the pioneer packet to all other waiting packets.
+* this wouldn't work in multithreaded applications though. pioneer packet could call this handler *AFTER* this pushes
+  the handler onto the map, but *BEFORE* the co_routine frame is set up. so we use asio::experimental::channel to send
+  the val computed by the pioneer packet to all other waiting packets.

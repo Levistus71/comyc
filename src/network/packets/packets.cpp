@@ -6,18 +6,15 @@
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 
-namespace utun{
 
-[[nodiscard]] bool RawPacket::parse_packet()
-{
+namespace utun{
+[[nodiscard]] bool RawPacket::parse_packet(){
     return parse_macos_header() && parse_headers();
 }
 
 
-
-[[nodiscard]] bool RawPacket::parse_macos_header()
-{
-    if(bytes_received<sizeof(family_hdr))
+[[nodiscard]] bool RawPacket::parse_macos_header(){
+    if(bytes_received < sizeof(family_hdr))
         return false;
 
     std::memcpy(&family_hdr, payload.data(), sizeof(family_hdr));
@@ -36,9 +33,8 @@ namespace utun{
 }
 
 
-[[nodiscard]] bool RawPacket::parse_headers()
-{
-    if(bytes_received<sizeof(family_hdr)+ip_hdr_sz)
+[[nodiscard]] bool RawPacket::parse_headers(){
+    if(bytes_received < sizeof(family_hdr) + ip_hdr_sz)
         return false;
 
     auto headers_start = payload.data() + sizeof(family_hdr);
@@ -48,7 +44,7 @@ namespace utun{
     if(family_hdr == AF_INET){
         auto* iph = reinterpret_cast<const struct ip*>(headers_start);
         // while_debug
-        total_packet_len = ntohs(iph->ip_len);  // doubt: might break on macos. don't use ntohs for macos.
+        total_packet_len = ntohs(iph->ip_len); // doubt: might break on macos. don't use ntohs for macos.
 
         ip_hdr_sz = iph->ip_hl * 4; // variable header size
         if(ip_hdr_sz < 20 || bytes_received < sizeof(family_hdr) + ip_hdr_sz)
@@ -79,10 +75,10 @@ namespace utun{
 
         src_addr = asio::ip::address_v6(src_bytes);
         dest_addr = asio::ip::address_v6(dst_bytes);
-        
+
         // imp: we don't care about header extensions in ipv6, we drop all those packets
         // imp: in the protocol == IPPROTO_TCP || UDP check below.
-        protocol = ip6h->ip6_nxt;   // doubt: header extensions
+        protocol = ip6h->ip6_nxt; // doubt: header extensions
     }
 
     if(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP){
@@ -95,11 +91,10 @@ namespace utun{
         std::memcpy(&src, p, sizeof(src));
         std::memcpy(&dst, p + 2, sizeof(dst));
 
-        src_port  = ntohs(src);
+        src_port = ntohs(src);
         dest_port = ntohs(dst);
     }
 
     return true;
 }
-
 }

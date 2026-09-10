@@ -1,5 +1,3 @@
 #include "src/node/node.hpp"
 
-int main(){
-    
-}
+int main(){}

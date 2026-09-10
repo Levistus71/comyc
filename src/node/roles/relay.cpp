@@ -2,14 +2,13 @@
 
 #include <iostream>
 
+
 Relay::Relay(asio::io_context& ioc, asio::ip::udp::socket& sock):
     ioc_(ioc),
-    udp_socket_(sock)
-{
+    udp_socket_(sock){}
 
-}
 
-Relay::~Relay()= default;
+Relay::~Relay() = default;
 
 
 void Relay::start(){
@@ -27,15 +26,15 @@ outgoing packet:
     {thdr, phdr, payload}
 */
 [[nodiscard]] static bool parse_packet_from_client(std::shared_ptr<IncomingCell> packet){
-    if(packet->bytes_received<sizeof(RoutingFlag)+sizeof(session_id_t)){
+    if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t)){
         return false;
     }
 
     packet->sid = (static_cast<session_id_t>(packet->payload[1]) << 24) |
-        (static_cast<session_id_t>(packet->payload[2]) << 16) |
-        (static_cast<session_id_t>(packet->payload[3]) <<  8) |
-        static_cast<session_id_t>(packet->payload[4]);
-    
+                  (static_cast<session_id_t>(packet->payload[2]) << 16) |
+                  (static_cast<session_id_t>(packet->payload[3]) << 8) |
+                  static_cast<session_id_t>(packet->payload[4]);
+
     packet->outgoing_bytes = packet->bytes_received - sizeof(session_id_t);
     packet->payload_bytes = packet->bytes_received - sizeof(RoutingFlag) - sizeof(session_id_t);
     packet->start_offset = sizeof(RoutingFlag) + sizeof(session_id_t);
@@ -44,6 +43,7 @@ outgoing packet:
     return true;
 }
 
+
 asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packet){
     if(!parse_packet_from_client(packet)){
         std::cerr << "[Relay] Dropping faulty packet, route_packet, size<5." << std::endl;
@@ -51,7 +51,7 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
     }
 
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
-    if(exit_info==nullptr){
+    if(exit_info == nullptr){
         std::cerr << "[Relay] Dropping invalid packet, no session_id map found." << std::endl;
         co_return;
     }
@@ -82,12 +82,13 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
                 std::cerr << "[Relay] Exit send failed: " << ec.message() << std::endl;
                 return;
             }
-            if(bytes_xfer!=keep_alive->outgoing_bytes){
+            if(bytes_xfer != keep_alive->outgoing_bytes){
                 std::cerr << "[Relay] Bytes sent mismatch: udp socket fail?" << std::endl;
             }
         }
     );
 }
+
 
 /*
 incoming packet:
@@ -99,18 +100,18 @@ outgoing packet:
     {thdr, phdr, payload}
 */
 [[nodiscard]] static bool parse_packet_from_exit(std::shared_ptr<IncomingCell> packet){
-    if(packet->bytes_received<sizeof(RoutingFlag)+sizeof(circuit_id_t)){
+    if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(circuit_id_t)){
         return false;
     }
 
     packet->cid = 0;
-    size_t loops = sizeof(circuit_id_t)/sizeof(uint8_t);
-    for(size_t i=0;i<loops;i++){
-        uint8_t byte = static_cast<circuit_id_t>(packet->payload[i+1]);
-        size_t shift = 8 * (loops-i-1);
+    size_t loops = sizeof(circuit_id_t) / sizeof(uint8_t);
+    for(size_t i = 0; i < loops; i++){
+        uint8_t byte = static_cast<circuit_id_t>(packet->payload[i + 1]);
+        size_t shift = 8 * (loops - i - 1);
         packet->cid |= (byte << shift);
     }
-    
+
     packet->outgoing_bytes = packet->bytes_received + sizeof(session_id_t);
     packet->payload_bytes = packet->bytes_received - sizeof(RoutingFlag);
     packet->start_offset = sizeof(RoutingFlag);
@@ -118,7 +119,6 @@ outgoing packet:
 
     return true;
 }
-
 
 
 asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> packet){
@@ -161,7 +161,7 @@ asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> pac
                 std::cerr << "[Relay] Exit send failed: " << ec.message() << std::endl;
                 return;
             }
-            if(keep_alive->outgoing_bytes!=bytes_xfer){
+            if(keep_alive->outgoing_bytes != bytes_xfer){
                 std::cerr << "[Relay] Bytes sent mismatch: udp socket fail?" << std::endl;
             }
         }

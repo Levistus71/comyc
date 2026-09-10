@@ -157,38 +157,61 @@ Execution:
 // ! for co_return, we need to add/modify functions in promise_type struct.
 
 
-template <typename T>
+template<typename T>
 class Generator{
 public:
     struct promise_type{
         T heap_val;
 
+
         Generator get_return_object(){
             return Generator(std::coroutine_handle<promise_type>::from_promise(*this));
         }
 
-        std::suspend_always initial_suspend() { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
+
+        std::suspend_always initial_suspend(){
+            return {};
+        }
+
+
+        std::suspend_always final_suspend() noexcept{
+            return {};
+        }
+
+
         std::suspend_always yield_value(const T& val){
             heap_val = val;
             return {};
         }
+
+
         std::suspend_always yield_value(T&& val){
             heap_val = std::move(val);
             return {};
         }
 
-        void return_void() {}
-        void unhandled_exception() { std::terminate(); }
+
+        void return_void(){}
+
+
+        void unhandled_exception(){
+            std::terminate();
+        }
     };
+
 
     std::coroutine_handle<promise_type> handle;
 
-    Generator(std::coroutine_handle<promise_type> h) : handle(h) {}
+
+    Generator(std::coroutine_handle<promise_type> h):
+        handle(h){}
+
+
     ~Generator(){
         if(handle)
             handle.destroy();
     }
+
 
     bool done(){
         if(handle && !handle.done())
@@ -196,9 +219,11 @@ public:
         return true;
     }
 
-    const T& get_value() const {
+
+    const T& get_value() const{
         return handle.promise().heap_val;
     }
+
 
     void continue_exec(){
         if(done())
@@ -224,6 +249,7 @@ Generator<int> coroutine_ex(){
     co_yield 30;
 }
 
+
 void main2(){
     Generator<int> gen = coroutine_ex();
     /*
@@ -240,28 +266,46 @@ void main2(){
 }
 
 
-
 // As all coroutines need to return a wrapper (Generator) wrapped over promise_type, we create this class
 class Task{
 public:
     struct promise_type{
-        Task get_return_object(){ return {}; }
-        std::suspend_never initial_suspend() { return {}; }
-        std::suspend_never final_suspend() noexcept {return {}; }
+        Task get_return_object(){
+            return {};
+        }
+
+
+        std::suspend_never initial_suspend(){
+            return {};
+        }
+
+
+        std::suspend_never final_suspend() noexcept{
+            return {};
+        }
+
+
         void return_void(){}
-        void unhandled_exception() { std::terminate(); }
+
+
+        void unhandled_exception(){
+            std::terminate();
+        }
     };
 };
+
 
 struct MyAwaitable{
     std::string data;
 
+
     bool await_ready(){
-        return false;   // always pauses the coroutine
+        return false; // always pauses the coroutine
     }
 
+
     void await_suspend(std::coroutine_handle<> h){
-        std::thread(    // background process
+        std::thread( // background process
             [h, this](){
                 this->data = "Some data produced by the background process";
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -270,10 +314,12 @@ struct MyAwaitable{
         ).detach();
     }
 
+
     std::string await_resume(){
         return data;
     }
 };
+
 
 Task some_task(){
     std::cout << "[Coroutine] Thread id (Main thread): " << std::this_thread::get_id() << std::endl;
@@ -296,6 +342,7 @@ Task some_task(){
     std::cout << "[Coroutine] !!! BECAUSE the thread in await_suspend() called h.resume(), the background thread is resuming this function." << std::endl;
     co_return;
 }
+
 
 void co_await_main(){
     std::cout << "[main] THREAD ID: " << std::this_thread::get_id() << std::endl;

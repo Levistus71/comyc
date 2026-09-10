@@ -15,16 +15,17 @@
 #include <netinet/udp.h>
 #include <netinet/tcp.h>
 
-namespace utun{
 
+namespace utun{
 // ! START: remove all these functions, temporarily used by dummy_utun() and simulate_utun()
 
 static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp);
 
-static std::string random_payload(std::mt19937& rng, size_t min_len = 1300, size_t max_len = 1700) {
-    static std::string_view chars = 
+
+static std::string random_payload(std::mt19937& rng, size_t min_len = 1300, size_t max_len = 1700){
+    static std::string_view chars =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()";
-    
+
     std::uniform_int_distribution<size_t> len_dist(min_len, max_len);
     std::uniform_int_distribution<size_t> char_dist(0, chars.size() - 1);
 
@@ -32,15 +33,16 @@ static std::string random_payload(std::mt19937& rng, size_t min_len = 1300, size
     std::string result;
     result.reserve(length);
 
-    for (size_t i = 0; i < length; ++i) {
+    for(size_t i = 0; i < length; ++i){
         result += chars[char_dist(rng)];
     }
     return result;
 }
 
+
 void simulate_utun(const int write_fd){
     std::cout << "[Simulated System] Started writing TUN frames." << std::endl;
-    
+
     std::mt19937 rng(std::random_device{}());
     std::bernoulli_distribution coin_flip(0.5);
 
@@ -50,33 +52,33 @@ void simulate_utun(const int write_fd){
 
         std::string payload = random_payload(rng);
         auto [os_header, raw_packet] = utun::build_packet(payload, ipv4, tcp);
-        
+
         std::vector<uint8_t> raw_bytes;
         raw_bytes.reserve(sizeof(os_header) + raw_packet.size());
-        
+
         const auto* hdr_ptr = reinterpret_cast<const uint8_t*>(&os_header);
         raw_bytes.insert(raw_bytes.end(), hdr_ptr, hdr_ptr + sizeof(os_header));
-        
+
         raw_bytes.insert(raw_bytes.end(), raw_packet.begin(), raw_packet.end());
 
         ssize_t bytes_sent = send(write_fd, raw_bytes.data(), raw_bytes.size(), 0);
-        if (bytes_sent < 0) {
+        if(bytes_sent < 0){
             std::perror("[Simulated System] Send failed");
             break;
         }
 
         std::cout << "[Simulated System] Sent " << bytes_sent << " bytes | "
-                  << (ipv4 ? "IPv4" : "IPv6") << " " 
-                  << (tcp ? "TCP" : "UDP") << " | " << std::endl;
+            << (ipv4 ? "IPv4" : "IPv6") << " "
+            << (tcp ? "TCP" : "UDP") << " | " << std::endl;
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 }
 
 
-std::pair<int,int> dummy_tun(){
+std::pair<int, int> dummy_tun(){
     int sv[2] = {-1, -1};
-    if(socketpair(AF_UNIX, SOCK_STREAM, 0, sv)<0){
+    if(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0){
         perror("Socketpair creation failed");
         throw std::runtime_error("Socketpair creation failed.");
     }
@@ -130,16 +132,16 @@ static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp){
         data_start = transport_hdr_start + sizeof(tcphdr);
 
         auto* tcp_hdr = reinterpret_cast<struct tcphdr*>(transport_hdr_start);
-        tcp_hdr->th_sport = htons(53535);   // source port
-        tcp_hdr->th_dport = htons(53);      // destination port
-        tcp_hdr->th_seq = htonl(1000);      // seq no.
-        tcp_hdr->th_ack = htonl(0);         // ack no.
-        tcp_hdr->th_off = 5;                // data offset, data starts from byte 5*4 = 20, 5 "words"
-        tcp_hdr->th_x2 = 0;                 // reserved bits (idk)
-        tcp_hdr->th_flags = TH_SYN;         // tcp flags
-        tcp_hdr->th_win = htons(65535);     // how much the receiver is currently willing to accept before waiting for ACK
-        tcp_hdr->th_sum = 0;                // checksum
-        tcp_hdr->th_urp = 0;                // urgent pointer (idk)
+        tcp_hdr->th_sport = htons(53535); // source port
+        tcp_hdr->th_dport = htons(53);    // destination port
+        tcp_hdr->th_seq = htonl(1000);    // seq no.
+        tcp_hdr->th_ack = htonl(0);       // ack no.
+        tcp_hdr->th_off = 5;              // data offset, data starts from byte 5*4 = 20, 5 "words"
+        tcp_hdr->th_x2 = 0;               // reserved bits (idk)
+        tcp_hdr->th_flags = TH_SYN;       // tcp flags
+        tcp_hdr->th_win = htons(65535);   // how much the receiver is currently willing to accept before waiting for ACK
+        tcp_hdr->th_sum = 0;              // checksum
+        tcp_hdr->th_urp = 0;              // urgent pointer (idk)
     }
     else{
         data_start = transport_hdr_start + sizeof(udphdr);
@@ -155,12 +157,11 @@ static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp){
 
     return UtunPacket{
         // .os_header = static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6),
-        .os_header = htonl(static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6)),
+        .os_header  = htonl(static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6)),
         .raw_packet = std::move(packet)
     };
 }
 
+
 // ! END
-
-
 } // namespace utun
