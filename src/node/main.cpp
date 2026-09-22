@@ -1,15 +1,13 @@
-#include <iostream>
+#include "src/node/node.hpp"
+
 #include <quill/Backend.h>
 #include <quill/Frontend.h>
 #include "quill/sinks/FileSink.h"
 #include <quill/LogMacros.h>
 
 
-#include "src/node/node.hpp"
-
 
 static void setup_loggers(){
-    quill::Backend::start();
     auto file_sink = quill::Frontend::create_or_get_sink<quill::FileSink>(
         "logs.txt",
         [](){
@@ -29,6 +27,7 @@ static void setup_loggers(){
         }
     );
 
+    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "relay_logger",
         std::move(file_sink),
@@ -38,6 +37,7 @@ static void setup_loggers(){
         }
     );
 
+    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "exit_logger",
         std::move(file_sink),
@@ -47,7 +47,7 @@ static void setup_loggers(){
         }
     );
 
-
+    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "main_logger",
         std::move(file_sink),
@@ -57,6 +57,7 @@ static void setup_loggers(){
         }
     );
 
+    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "node_logger",
         std::move(file_sink),
@@ -65,6 +66,8 @@ static void setup_loggers(){
             "%H:%M:%S.%Qns"
         }
     );
+
+    quill::Backend::start();
 }
 
 
@@ -79,7 +82,9 @@ int main(){
     // fixme: role should be decided dynamically
     constexpr auto role = NodeRole::CLIENT_RELAY;
     const auto node = std::make_shared<Node>(ioc, role);
+    LOG_INFO(main_logger, "Node starting.");
     node->start();
+    LOG_INFO(main_logger, "Node started.");
 
     // capture signints or sigterms (for clean exit, communicate with relays/exit, kill utun etc)
     asio::signal_set signals(ioc, SIGINT, SIGTERM);

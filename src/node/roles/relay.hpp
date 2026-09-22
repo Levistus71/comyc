@@ -24,7 +24,7 @@ struct ClientInfo{
 };
 
 
-class Relay : std::enable_shared_from_this<Relay>{
+class Relay : public std::enable_shared_from_this<Relay>{
 public:
     Relay(asio::io_context& ioc, asio::ip::udp::socket& sock);
 

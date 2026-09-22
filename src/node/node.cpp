@@ -1,5 +1,7 @@
 #include "src/node/node.hpp"
 
+#include <iostream>
+
 #include "quill/LogMacros.h"
 #include "quill/Frontend.h"
 
@@ -20,12 +22,22 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
 
     if(static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::EXIT))
         exit_ = std::make_shared<Exit>();
+
+    ignore_endpoint_ = std::make_shared<asio::ip::udp::endpoint>(asio::ip::udp::v4(), 8008);
 }
 
 
 void Node::start(){
-    if(client_ != nullptr)
-        client_->start();
+    if(bool expected = false; running_.compare_exchange_strong(expected, true)==false){
+        LOG_ERROR(logger_, "start() called when running_.");
+        return;
+    }
+
+    if(client_ != nullptr){
+        if(!client_->start()){
+            LOG_ERROR(logger_, "Client not started.");
+        }
+    }
 
     if(relay_ != nullptr)
         relay_->start();
@@ -33,12 +45,17 @@ void Node::start(){
     if(exit_ != nullptr)
         exit_->start();
 
-    auto first_packet = std::make_shared<IncomingCell>();
+    const auto first_packet = std::make_shared<IncomingCell>();
     listen(first_packet);
 }
 
 
 void Node::stop(){
+    if(bool expected = true; running_.compare_exchange_strong(expected, false) == false){
+        LOG_ERROR(logger_, "stop() called when not running_.");
+        return;
+    }
+
     if(client_ != nullptr)
         client_->stop();
 
@@ -57,12 +74,11 @@ void Node::stop(){
 }
 
 
-void Node::listen(std::shared_ptr<IncomingCell> packet){
-    auto ignore = std::make_shared<asio::ip::udp::endpoint>(); // optimize: shared_ptr on every packet read is costly, make it a member?
+void Node::listen(const std::shared_ptr<IncomingCell>& packet){
     udp_socket_.async_receive_from(
         asio::buffer(packet->payload),
-        (*ignore),
-        [me=shared_from_this(), packet, keep_alive = ignore](const boost::system::error_code& ec, const size_t bytes_received){
+        (*ignore_endpoint_),
+        [me=shared_from_this(), packet](const boost::system::error_code& ec, const size_t bytes_received){
             packet->bytes_received = bytes_received;
             me->loop_listen(packet, ec);
         }
@@ -70,7 +86,7 @@ void Node::listen(std::shared_ptr<IncomingCell> packet){
 }
 
 
-void Node::loop_listen(std::shared_ptr<IncomingCell> packet, const boost::system::error_code& ec){
+void Node::loop_listen(const std::shared_ptr<IncomingCell>& packet, const boost::system::error_code& ec){
     if(ec){
         LOG_ERROR(logger_, "Packet receive failed in loop_listen(): {}", ec.message());
         return;
@@ -83,7 +99,7 @@ void Node::loop_listen(std::shared_ptr<IncomingCell> packet, const boost::system
 }
 
 
-void Node::route_packet(std::shared_ptr<IncomingCell> packet){
+void Node::route_packet(const std::shared_ptr<IncomingCell>& packet){
     if(packet->bytes_received < sizeof(RoutingFlag)){
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<1.");
         return;

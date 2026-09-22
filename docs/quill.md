@@ -1,0 +1,25 @@
+### Available Macros
+The severity levels, ordered from lowest to highest:
+
+* LOG_TRACE(logger, fmt, ...): Extremely detailed diagnostic info (usually disabled in release builds).
+
+* LOG_DEBUG(logger, fmt, ...): Debugging details for developers during troubleshooting.
+
+* LOG_INFO(logger, fmt, ...): General operational events (e.g., "Server started", "Connection established").
+
+* LOG_WARNING(logger, fmt, ...): Non-critical anomalies that don't stop execution (e.g., "Retrying packet transmission").
+
+* LOG_ERROR(logger, fmt, ...): Recoverable errors or failures (e.g., "Failed to bind socket").
+
+* LOG_CRITICAL(logger, fmt, ...): Severe system failures that usually precede an application abort.
+
+### When to Use Each Level
+* LOG_TRACE / LOG_DEBUG: Use when tracing low-level execution paths, such as entering a function, dumping byte buffers, or tracking state machine transitions.
+
+* LOG_INFO: Use for major lifecycle milestones or significant structural events (e.g., configuration loaded, peer connected, shutdown initiated).
+
+* LOG_WARNING: Use when something unexpected happens, but the application can safely handle or bypass it (e.g., a malformed packet was received and dropped).
+
+* LOG_ERROR: Use when an operation fails and an expected action cannot be completed (e.g., a read/write timeout, an authentication failure, or a failed system call like bind or listen).
+
+* LOG_CRITICAL: Use when the application has encountered a fatal condition and cannot continue operating safely.

@@ -5,6 +5,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <iostream>
 
 #include <boost/asio.hpp>
 
@@ -37,6 +38,12 @@ Client::~Client(){
 
     // todo: connect_control_server(), connect_peers() etc;
 
+    boost::system::error_code ec;
+    if(Utun::bind_to_en0(udp_socket_, "en0", ec)){
+        LOG_ERROR(logger_, "udp_socket_ failed to bind to en0: {}", ec.message());
+        return false;
+    }
+
     if(!utun_.start()){
         LOG_ERROR(logger_, "Failed to start utun.");
         return false;
@@ -44,7 +51,7 @@ Client::~Client(){
 
     utun_sockfd_ = utun_.get_fd();
 
-    boost::system::error_code ec;
+    ec.clear();
     if(utun_stream_.assign(utun_sockfd_, ec)){
         LOG_ERROR(logger_, "Failed to convert utun_sockfd_ to asio stream_descriptor.");
         return false;
@@ -158,7 +165,8 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
         relay->endpoint,
         // raw_packet and headers in the lambda to make sure it doesn't get destroyed
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [keep_alive1 = raw_packet, keep_alive2 = headers, me=shared_from_this(), outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
+        [me=shared_from_this(), outgoing_bytes, keep_alive1 = raw_packet, keep_alive2 = headers, keep_alive3 = outgoing, keep_alive4 = relay]
+        (const boost::system::error_code& ec, std::size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "[TUN Worker] Send failed: {}", ec.message());
                 return;
@@ -241,4 +249,57 @@ void Client::stop(){
     utun_.stop();
 
     // TODO: signal relays/exit
+}
+
+
+void Client::process_incoming_packet(std::shared_ptr<IncomingCell> packet){
+    if(!parse_incoming_packet(packet)){
+        LOG_WARNING(logger_, "Dropping faulty packet.");
+    }
+
+    async_write_to_utun(packet);
+}
+
+/*
+incoming packet:
+    route_flag
+    session_id
+    {thdr, phdr, payload}
+*/
+[[nodiscard]] bool Client::parse_incoming_packet(std::shared_ptr<IncomingCell> packet){
+    if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t)){
+        return false;
+    }
+
+    packet->sid = 0;
+    size_t loops = sizeof(session_id_t) / sizeof(uint8_t);
+    for(size_t i = 0; i < loops; i++){
+        uint8_t byte = static_cast<session_id_t>(packet->payload[i + sizeof(RoutingFlag)]);
+        size_t shift = 8 * (loops - i - 1);
+        packet->cid |= (byte << shift);
+    }
+
+    // todo: decrypt_using_sh_cr()
+    // todo: decrypt_using_sh_ce()
+
+    if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t) + sizeof(circuit_id_t)){
+        return false;
+    }
+
+    packet->cid = 0;
+    loops = sizeof(circuit_id_t) / sizeof(uint8_t);
+    for(size_t i = 0; i < loops; i++){
+        uint8_t byte = static_cast<circuit_id_t>(packet->payload[i + sizeof(RoutingFlag) + sizeof(session_id_t)]);
+        size_t shift = 8 * (loops - i - 1);
+        packet->cid |= (byte << shift);
+    }
+
+    // todo: actual packet parsing, start_offset etc.
+    return true;
+}
+
+
+void Client::async_write_to_utun(std::shared_ptr<IncomingCell> packet){
+    // todo: complete this
+    return;
 }

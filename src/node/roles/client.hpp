@@ -153,4 +153,10 @@ private:
 
 
     std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);
+
+
+    [[nodiscard]] bool parse_incoming_packet(std::shared_ptr<IncomingCell> packet);
+
+
+    void async_write_to_utun(std::shared_ptr<IncomingCell> packet);
 };

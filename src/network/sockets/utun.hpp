@@ -29,7 +29,10 @@ public:
     void stop();
 
 
-    [[nodiscard]] inline int get_fd() const;
+    [[nodiscard]] int get_fd() const;
+
+
+    [[nodiscard]] static bool bind_to_en0(asio::ip::udp::socket& socket, const std::string& interface_name, boost::system::error_code& ec);
 
 private:
     struct RouteConfig{
@@ -47,7 +50,7 @@ private:
     asio::ip::address_v4 dummy_local_ipv4_;
     asio::ip::address_v4 dummy_gateway_ipv4_;
     asio::ip::address_v6 dummy_local_ipv6_;
-    asio::ip::address_v4 dummy_gateway_ipv6_;
+    asio::ip::address_v6 dummy_gateway_ipv6_;
 
 
     [[nodiscard]] static bool modify_route(bool enable,

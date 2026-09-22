@@ -145,4 +145,4 @@ struct IncomingCell{
     session_id_t sid = 0;
     circuit_id_t cid = 0;
     std::array<uint8_t, CELL_MAX_SZ> payload;
-}
+};

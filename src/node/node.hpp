@@ -56,7 +56,7 @@ assign role (client/client+relay)
 
 */
 
-class Node : std::enable_shared_from_this<Node>{
+class Node : public std::enable_shared_from_this<Node>{
 public:
     Node(asio::io_context& ioc, NodeRole role);
 
@@ -84,6 +84,8 @@ public:
 private:
     NodeRole role_;
 
+    std::atomic<bool> running_;
+
     std::shared_ptr<Client> client_ = nullptr;
     std::shared_ptr<Relay> relay_ = nullptr;
     std::shared_ptr<Exit> exit_ = nullptr;
@@ -92,15 +94,16 @@ private:
     asio::ip::udp::socket udp_socket_;
 
     asio::ip::udp::endpoint listening_endpoint_;
+    std::shared_ptr<asio::ip::udp::endpoint> ignore_endpoint_;
 
     quill::Logger* logger_{nullptr};
 
 
-    void listen(std::shared_ptr<IncomingCell> packet);
+    void listen(const std::shared_ptr<IncomingCell>& packet);
 
 
-    void loop_listen(std::shared_ptr<IncomingCell> packet, const boost::system::error_code& ec);
+    void loop_listen(const std::shared_ptr<IncomingCell>& packet, const boost::system::error_code& ec);
 
 
-    void route_packet(std::shared_ptr<IncomingCell> packet);
+    void route_packet(const std::shared_ptr<IncomingCell>& packet);
 };

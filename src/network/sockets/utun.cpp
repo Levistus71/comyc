@@ -1,5 +1,6 @@
 #include "src/network/sockets/utun.hpp"
 
+#include <iostream>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/kern_control.h>
@@ -12,17 +13,18 @@
 #include <netinet6/in6_var.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <netinet6/nd6.h>
 
 #include <string>
-
 #include <boost/asio.hpp>
-
 #include <quill/LogMacros.h>
 
 
 Utun::Utun(){
     logger_ = quill::Frontend::get_logger("client_logger");
+    dummy_local_ipv4_ = asio::ip::make_address_v4("10.8.0.2");
+    dummy_gateway_ipv4_ = asio::ip::make_address_v4("10.8.0.1");
+    dummy_local_ipv6_ = asio::ip::make_address_v6("fd00::2");
+    dummy_gateway_ipv6_ = asio::ip::make_address_v6("fd00::1");
 }
 
 
@@ -115,7 +117,7 @@ void Utun::stop(){
 }
 
 
-inline int Utun::get_fd() const{
+int Utun::get_fd() const{
     return utun_fd_;
 }
 
@@ -173,34 +175,26 @@ inline int Utun::get_fd() const{
         return false;
     }
 
-    LOG_INFO(logger_, "[UTUN] Successfully connected to utun, name: {}", utun_name);
+    utun_name_ = std::string(utun_name);
+
+    LOG_INFO(logger_, "[UTUN] Successfully connected to utun, name: {}", utun_name_);
     LOG_INFO(logger_, "[UTUN] Trying to hijack system traffic.");
 
-    if(!configure_utun_v4(asio::ip::make_address_v4("10.8.0.2"), asio::ip::make_address_v4("10.8.0.1"))){
+
+    if(!configure_utun_v4(dummy_local_ipv4_, dummy_gateway_ipv4_)){
         LOG_ERROR(logger_, "[UTUN] Failed to configure interface IPs. ioctl fail?");
         ::close(utun_fd_);
         return false;
     }
 
-    if(!configure_utun_v6(asio::ip::make_address_v6("10.8.0.2"), asio::ip::make_address_v6("10.8.0.1"))){
+    if(!configure_utun_v6(dummy_local_ipv6_, dummy_gateway_ipv6_)){
         LOG_ERROR(logger_, "[UTUN] Failed to configure interface IPs. ioctl fail?");
         ::close(utun_fd_);
         return false;
     }
 
-    utun_name_ = std::string(utun_name);
-    const std::string setup_cmd =
-        "ifconfig " + utun_name_ + " 10.8.0.2 10.8.0.1 up && "
-        "route add -net 0.0.0.0/1 10.8.0.1 > /dev/null 2>&1 && "
-        "route add -net 128.0.0.0/1 10.8.0.1 > /dev/null 2>&1";
 
-    if(std::system(setup_cmd.c_str()) != 0){
-        LOG_ERROR(logger_, "[UTUN] Failed to hijack system traffic.");
-        ::close(utun_fd_);
-        return false;
-    }
-
-    LOG_INFO(logger_, "[UTUN] Successfully hijacked system traffic, routed through: {}", utun_name_);
+    LOG_INFO(logger_, "[UTUN] Successfully configured utun, name: {}", utun_name_);
     return true;
 }
 
@@ -245,17 +239,27 @@ inline int Utun::get_fd() const{
         return false;
     }
 
+    const unsigned int if_index = if_nametoindex(utun_name_.c_str());
+    if(if_index == 0){
+        LOG_ERROR(logger_, "[UTUN] if_index == 0.");
+        ::close(sock);
+        return false;
+    }
+
     in6_aliasreq ifra{};
     std::memset(&ifra, 0, sizeof(ifra));
     std::strncpy(ifra.ifra_name, utun_name_.c_str(), IFNAMSIZ);
 
     ifra.ifra_addr.sin6_family = AF_INET6;
     ifra.ifra_addr.sin6_len = sizeof(sockaddr_in6);
+    ifra.ifra_addr.sin6_scope_id = if_index;
     inet_pton(AF_INET6, local_ip.to_string().c_str(), &ifra.ifra_addr.sin6_addr);
 
-    ifra.ifra_dstaddr.sin6_family = AF_INET6;
-    ifra.ifra_dstaddr.sin6_len = sizeof(sockaddr_in6);
-    inet_pton(AF_INET6, remote_ip.to_string().c_str(), &ifra.ifra_dstaddr.sin6_addr);
+    // NOTE: Omit ifra_dstaddr for macOS utun v6 aliasing to prevent EINVAL
+    // ifra.ifra_dstaddr.sin6_family = AF_INET6;
+    // ifra.ifra_dstaddr.sin6_len = sizeof(sockaddr_in6);
+    // ifra.ifra_dstaddr.sin6_scope_id = if_index;
+    // inet_pton(AF_INET6, remote_ip.to_string().c_str(), &ifra.ifra_dstaddr.sin6_addr);
 
     ifra.ifra_prefixmask.sin6_family = AF_INET6;
     ifra.ifra_prefixmask.sin6_len = sizeof(sockaddr_in6);
@@ -267,12 +271,17 @@ inline int Utun::get_fd() const{
             (0xFF << (8 - (prefix_len % 8))) & 0xFF;
     }
 
-    ifra.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
-    ifra.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
+    ifra.ifra_lifetime.ia6t_vltime = 0xffffffff; // valid_lifetime: max possible lifetime
+    ifra.ifra_lifetime.ia6t_pltime = 0xffffffff; // preferred lifetime: max possible lifetime
 
-    const bool res = (::ioctl(sock, SIOCAIFADDR_IN6, &ifra) >= 0);
+    // const bool res = (::ioctl(sock, SIOCAIFADDR_IN6, &ifra) >= 0);
+    const int x = ::ioctl(sock, SIOCAIFADDR_IN6, &ifra);
+    if(x<0){
+        const int err = errno;
+        LOG_ERROR(logger_, "[UTUN] ioctl() fail. err: {}", errno);
+    }
     ::close(sock);
-    return res;
+    return x >= 0;
 }
 
 
@@ -432,4 +441,34 @@ inline int Utun::get_fd() const{
     const bool ret = (::write(sock, &msg, sizeof(msg)) > 0);
     ::close(sock);
     return ret;
+}
+
+
+[[nodiscard]] bool Utun::bind_to_en0(asio::ip::udp::socket& socket,
+                                     const std::string& interface_name,
+                                     boost::system::error_code& ec){
+    ec.clear();
+
+    const unsigned int if_index = ::if_nametoindex(interface_name.c_str());
+    if(if_index == 0){
+        return false;
+    }
+
+    const int fd = socket.native_handle();
+
+    if(socket.local_endpoint(ec).protocol() == asio::ip::udp::v4() || !ec){
+        if(::setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &if_index, sizeof(if_index)) < 0){
+            ec = boost::system::error_code(errno, boost::system::generic_category());
+            return false;
+        }
+    }
+
+    if(socket.local_endpoint(ec).protocol() == asio::ip::udp::v6() || !ec){
+        if(::setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &if_index, sizeof(if_index)) < 0){
+            ec = boost::system::error_code(errno, boost::system::generic_category());
+            return false;
+        }
+    }
+
+    return true;
 }

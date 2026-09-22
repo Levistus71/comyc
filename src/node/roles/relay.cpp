@@ -84,7 +84,7 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
         exit_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [keep_alive = packet, me=shared_from_this()](const boost::system::error_code& ec, size_t bytes_xfer){
+        [me=shared_from_this(), keep_alive = packet, keep_alive2 = exit_info, keep_alive3 = outgoing](const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "[Relay] Exit send failed: {}", ec.message());
                 return;
@@ -114,7 +114,7 @@ outgoing packet:
     packet->cid = 0;
     size_t loops = sizeof(circuit_id_t) / sizeof(uint8_t);
     for(size_t i = 0; i < loops; i++){
-        uint8_t byte = static_cast<circuit_id_t>(packet->payload[i + 1]);
+        uint8_t byte = static_cast<circuit_id_t>(packet->payload[i + sizeof(RoutingFlag)]);
         size_t shift = 8 * (loops - i - 1);
         packet->cid |= (byte << shift);
     }
@@ -163,7 +163,8 @@ asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> pac
         client_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [keep_alive = packet, me=shared_from_this()](const boost::system::error_code& ec, size_t bytes_xfer){
+        [me=shared_from_this(), keep_alive = packet, keep_alive2 = outgoing, keep_alive3 = client_info]
+        (const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "Exit send failed: {}", ec.message());
                 return;

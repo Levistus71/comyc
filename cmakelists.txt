@@ -9,19 +9,32 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# build type: debug defaulted
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug)
+endif()
+
+# release flags
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+# debug flags (macOS)
+set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -fno-omit-frame-pointer")
+
+# Optional: Uncomment below to enable ThreadSanitizer on macOS
+# (Note: TSan requires a clean build folder and can sometimes conflict with certain system libraries)
+# set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=thread")
+# set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=thread")
+
 find_package(Boost REQUIRED COMPONENTS headers system)
 find_package(quill REQUIRED)
-
-find_package(Threads REQUIRED)  # required by boost
-
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Threads REQUIRED)
 
 # NETWORK
 add_library(network
         src/network/packets/packets.cpp
         src/network/sockets/utun.cpp
 )
-target_link_libraries(network PRIVATE encryption Boost::headers quill::quill)
+target_include_directories(network PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(network PRIVATE Boost::headers quill::quill Threads::Threads)
 
 # NODE APP
 add_executable(node_app
@@ -29,6 +42,8 @@ add_executable(node_app
         src/node/node.cpp
         src/node/roles/client.cpp
         src/node/roles/relay.cpp
+        src/node/roles/exit.cpp
 )
 set_target_properties(node_app PROPERTIES OUTPUT_NAME "node")
-target_link_libraries(node_app PRIVATE network Boost::headers quill::quill)
+target_include_directories(node_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(node_app PRIVATE network Boost::headers quill::quill Threads::Threads)
