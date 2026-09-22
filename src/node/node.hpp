@@ -10,9 +10,10 @@ namespace asio = boost::asio;
 
 
 enum class NodeRole : uint8_t{
-    CLIENT = 1 << 0,
-    RELAY  = 1 << 1,
-    EXIT   = 1 << 2
+    CLIENT       = 1 << 0,
+    RELAY        = 1 << 1,
+    EXIT         = 1 << 2,
+    CLIENT_RELAY = (1 << 0) | (1 << 1)
 };
 
 
@@ -55,27 +56,9 @@ assign role (client/client+relay)
 
 */
 
-
-constexpr size_t CELL_MAX_SZ = 2000;
-
-
-struct IncomingCell{
-    size_t bytes_received = 0;
-    size_t outgoing_bytes = 0;
-    size_t payload_bytes = 0;
-
-    RoutingFlag route_flag = RoutingFlag::INVALID;
-    size_t start_offset = 0;
-
-    session_id_t sid = 0;
-    circuit_id_t cid = 0;
-    std::array<uint8_t, CELL_MAX_SZ> payload;
-};
-
-
 class Node : std::enable_shared_from_this<Node>{
 public:
-    Node();
+    Node(asio::io_context& ioc, NodeRole role);
 
 
     void start();
@@ -101,14 +84,16 @@ public:
 private:
     NodeRole role_;
 
-    std::shared_ptr<Client> client_;
-    std::shared_ptr<Relay> relay_;
-    std::shared_ptr<Exit> exit_;
+    std::shared_ptr<Client> client_ = nullptr;
+    std::shared_ptr<Relay> relay_ = nullptr;
+    std::shared_ptr<Exit> exit_ = nullptr;
 
-    asio::io_context ioc_;
+    asio::io_context& ioc_;
     asio::ip::udp::socket udp_socket_;
 
     asio::ip::udp::endpoint listening_endpoint_;
+
+    quill::Logger* logger_{nullptr};
 
 
     void listen(std::shared_ptr<IncomingCell> packet);

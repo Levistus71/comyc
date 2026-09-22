@@ -130,3 +130,19 @@ struct ClientFullHeaders{
     TransitHeader thdr;
     PayloadHeader phdr;
 };
+
+
+constexpr size_t CELL_MAX_SZ = 2000;
+
+struct IncomingCell{
+    size_t bytes_received = 0;
+    size_t outgoing_bytes = 0;
+    size_t payload_bytes = 0;
+
+    RoutingFlag route_flag = RoutingFlag::INVALID;
+    size_t start_offset = 0;
+
+    session_id_t sid = 0;
+    circuit_id_t cid = 0;
+    std::array<uint8_t, CELL_MAX_SZ> payload;
+}

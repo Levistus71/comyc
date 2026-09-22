@@ -1,10 +1,11 @@
 #pragma once
 
-#include "src/node/node.hpp"
 #include "src/node/node_utils.hpp"
 #include "src/network/packets/cell.hpp"
 
 #include <boost/asio.hpp>
+
+#include <quill/Logger.h>
 
 
 namespace asio = boost::asio;
@@ -34,7 +35,8 @@ public:
     void start();
 
 
-    // auto stop();
+    void stop();
+
 
     asio::awaitable<void> forward_to_exit(std::shared_ptr<IncomingCell> packet);
 
@@ -46,4 +48,5 @@ private:
     asio::ip::udp::socket& udp_socket_;
     RCU_UMap<session_id_t, ExitInfo> sid_ei_umap_;
     RCU_UMap<circuit_id_t, ClientInfo> cid_ci_umap_;
+    quill::Logger* logger_{nullptr};
 };

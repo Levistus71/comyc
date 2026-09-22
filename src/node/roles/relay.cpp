@@ -1,11 +1,14 @@
 #include "src/node/roles/relay.hpp"
 
-#include <iostream>
+#include <quill/LogMacros.h>
+#include <quill/Frontend.h>
 
 
 Relay::Relay(asio::io_context& ioc, asio::ip::udp::socket& sock):
     ioc_(ioc),
-    udp_socket_(sock){}
+    udp_socket_(sock){
+    logger_ = quill::Frontend::get_logger("relay_logger");
+}
 
 
 Relay::~Relay() = default;
@@ -13,6 +16,10 @@ Relay::~Relay() = default;
 
 void Relay::start(){
     // todo: actual start up idk what to do here
+}
+
+void Relay::stop(){
+    // todo: signal clients about exit
 }
 
 
@@ -46,13 +53,13 @@ outgoing packet:
 
 asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packet){
     if(!parse_packet_from_client(packet)){
-        std::cerr << "[Relay] Dropping faulty packet, route_packet, size<5." << std::endl;
+        LOG_ERROR(logger_, "Dropping faulty packet, route_packet, size<5.");
         co_return;
     }
 
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
     if(exit_info == nullptr){
-        std::cerr << "[Relay] Dropping invalid packet, no session_id map found." << std::endl;
+        LOG_ERROR(logger_, "Dropping invalid packet, no session_id map found.");
         co_return;
     }
 
@@ -77,13 +84,13 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
         exit_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [keep_alive = packet](const boost::system::error_code& ec, size_t bytes_xfer){
+        [keep_alive = packet, me=shared_from_this()](const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
-                std::cerr << "[Relay] Exit send failed: " << ec.message() << std::endl;
+                LOG_ERROR(me->logger_, "[Relay] Exit send failed: {}", ec.message());
                 return;
             }
             if(bytes_xfer != keep_alive->outgoing_bytes){
-                std::cerr << "[Relay] Bytes sent mismatch: udp socket fail?" << std::endl;
+                LOG_ERROR(me->logger_, "[Relay] Bytes sent mismatch: udp socket fail?");
             }
         }
     );
@@ -123,13 +130,13 @@ outgoing packet:
 
 asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> packet){
     if(!parse_packet_from_exit(packet)){
-        std::cerr << "[Relay] Dropping faulty packet, route_packet, size<5." << std::endl;
+        LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<5.");
         co_return;
     }
 
     std::shared_ptr<ClientInfo> client_info = cid_ci_umap_.get(packet->cid);
     if(client_info == nullptr){
-        std::cerr << "[Relay] Dropping invalid packet, no circuit_id found." << std::endl;
+        LOG_WARNING(logger_, "Dropping invalid packet, no circuit_id found.");
         co_return;
     }
     packet->sid = client_info->session_id;
@@ -156,13 +163,13 @@ asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> pac
         client_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [keep_alive = packet](const boost::system::error_code& ec, size_t bytes_xfer){
+        [keep_alive = packet, me=shared_from_this()](const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
-                std::cerr << "[Relay] Exit send failed: " << ec.message() << std::endl;
+                LOG_ERROR(me->logger_, "Exit send failed: {}", ec.message());
                 return;
             }
             if(keep_alive->outgoing_bytes != bytes_xfer){
-                std::cerr << "[Relay] Bytes sent mismatch: udp socket fail?" << std::endl;
+                LOG_ERROR(me->logger_, "Bytes sent mismatch: udp socket fail?");
             }
         }
     );

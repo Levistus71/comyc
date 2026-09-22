@@ -1,167 +1,435 @@
 #include "src/network/sockets/utun.hpp"
 
-#include <iostream>
-#include <vector>
-#include <string>
-#include <thread>
-#include <random>
-#include <unistd.h>
-
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <sys/kern_control.h>
+#include <sys/sys_domain.h>
+#include <net/if_utun.h>
+#include <net/if.h>
+#include <net/if_var.h>
+#include <net/route.h>
+#include <netinet/in.h>
+#include <netinet6/in6_var.h>
 #include <arpa/inet.h>
+#include <unistd.h>
+#include <netinet6/nd6.h>
 
-#include <netinet/ip.h>
-#include <netinet/ip6.h>
+#include <string>
 
-#include <netinet/udp.h>
-#include <netinet/tcp.h>
+#include <boost/asio.hpp>
 
-
-namespace utun{
-// ! START: remove all these functions, temporarily used by dummy_utun() and simulate_utun()
-
-static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp);
+#include <quill/LogMacros.h>
 
 
-static std::string random_payload(std::mt19937& rng, size_t min_len = 1300, size_t max_len = 1700){
-    static std::string_view chars =
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()";
-
-    std::uniform_int_distribution<size_t> len_dist(min_len, max_len);
-    std::uniform_int_distribution<size_t> char_dist(0, chars.size() - 1);
-
-    size_t length = len_dist(rng);
-    std::string result;
-    result.reserve(length);
-
-    for(size_t i = 0; i < length; ++i){
-        result += chars[char_dist(rng)];
-    }
-    return result;
+Utun::Utun(){
+    logger_ = quill::Frontend::get_logger("client_logger");
 }
 
 
-void simulate_utun(const int write_fd){
-    std::cout << "[Simulated System] Started writing TUN frames." << std::endl;
+Utun::~Utun(){
+    stop();
+}
 
-    std::mt19937 rng(std::random_device{}());
-    std::bernoulli_distribution coin_flip(0.5);
 
-    while(true){
-        bool ipv4 = coin_flip(rng);
-        bool tcp = coin_flip(rng);
-
-        std::string payload = random_payload(rng);
-        auto [os_header, raw_packet] = utun::build_packet(payload, ipv4, tcp);
-
-        std::vector<uint8_t> raw_bytes;
-        raw_bytes.reserve(sizeof(os_header) + raw_packet.size());
-
-        const auto* hdr_ptr = reinterpret_cast<const uint8_t*>(&os_header);
-        raw_bytes.insert(raw_bytes.end(), hdr_ptr, hdr_ptr + sizeof(os_header));
-
-        raw_bytes.insert(raw_bytes.end(), raw_packet.begin(), raw_packet.end());
-
-        ssize_t bytes_sent = send(write_fd, raw_bytes.data(), raw_bytes.size(), 0);
-        if(bytes_sent < 0){
-            std::perror("[Simulated System] Send failed");
-            break;
+void Utun::stop(){
+    /*
+        val.compare_exchange_strong(&expected, desired)
+        if(val==expected){
+            val = desired;
+            return true;
         }
-
-        std::cout << "[Simulated System] Sent " << bytes_sent << " bytes | "
-            << (ipv4 ? "IPv4" : "IPv6") << " "
-            << (tcp ? "TCP" : "UDP") << " | " << std::endl;
-
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        else{
+            expected = val;
+            return false;
+        }
+    */
+    if(bool expected = true; running_.compare_exchange_strong(expected, false) == false){
+        LOG_ERROR(logger_, "[UTUN] Called stop() more than once.");
+        return;
     }
+
+    bool cleared_all = true;
+    for(const auto& r: active_routes_){
+        if(!modify_route(false, r.dest, r.mask, r.gateway)){
+            cleared_all = false;
+        }
+    }
+    active_routes_.clear();
+
+    if(utun_fd_ >= 0){
+        ::close(utun_fd_);
+        utun_fd_ = -1;
+    }
+
+    if(!cleared_all){
+        LOG_CRITICAL(logger_, "[UTUN] Couldn't erase all routes. Cannot guarantee network recovery.");
+        ::system("sudo route -q delete -net 0.0.0.0/1 > /dev/null 2>&1");
+        ::system("sudo route -q delete -net 128.0.0.0/1 > /dev/null 2>&1");
+        ::system("sudo route -q delete -inet6 -net ::/1 > /dev/null 2>&1");
+        ::system("sudo route -q delete -inet6 -net 8000::/1 > /dev/null 2>&1");
+        return;
+    }
+
+    LOG_INFO(logger_, "[UTUN] Stopped successfully.");
 }
 
 
-std::pair<int, int> dummy_tun(){
-    int sv[2] = {-1, -1};
-    if(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0){
-        perror("Socketpair creation failed");
-        throw std::runtime_error("Socketpair creation failed.");
+[[nodiscard]] bool Utun::start(){
+    /*
+        val.compare_exchange_strong(&expected, desired)
+        if(val==expected){
+            val = desired;
+            return true;
+        }
+        else{
+            expected = val;
+            return false;
+        }
+    */
+    if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
+        LOG_ERROR(logger_, "[UTUN] Called start() more than once.");
+        stop();
+        return false;
     }
 
-    return {sv[0], sv[1]};
+    if(!configure_utun()){
+        LOG_ERROR(logger_, "[UTUN] configure_utun() failed.");
+        stop();
+        return false;
+    }
+
+    if(!start_utun()){
+        LOG_ERROR(logger_, "[UTUN] start_utun() failed.");
+        stop();
+        return false;
+    }
+
+    if(!toggle_hijack_on()){
+        LOG_ERROR(logger_, "[UTUN] toggle_hijack_on() failed.");
+        stop();
+        return false;
+    }
+
+    LOG_INFO(logger_, "[UTUN] Started successfully.");
+    return true;
 }
 
 
-static UtunPacket build_packet(std::string_view data, bool ipv4, bool tcp){
-    size_t tot_sz;
-    size_t transport_hdr_size = (tcp) ? sizeof(struct tcphdr) : sizeof(struct udphdr);
-    std::vector<uint8_t> packet;
-    uint8_t* transport_hdr_start;
-    uint8_t* data_start;
+inline int Utun::get_fd() const{
+    return utun_fd_;
+}
 
-    // packet ip header
-    if(ipv4){
-        tot_sz = data.size() + sizeof(struct ip) + transport_hdr_size;
-        packet = std::vector<uint8_t>(tot_sz, 0);
-        transport_hdr_start = packet.data() + sizeof(struct ip);
 
-        auto* iph = reinterpret_cast<struct ip*>(packet.data());
-        iph->ip_v = 4;
-        iph->ip_hl = 5;
-        iph->ip_tos = 0;
-        iph->ip_len = htons(static_cast<uint16_t>(tot_sz));
-        iph->ip_id = htons(12345);
-        iph->ip_off = 0;
-        iph->ip_ttl = 64;
-        iph->ip_p = (tcp) ? IPPROTO_TCP : IPPROTO_UDP;
-        iph->ip_sum = 0;
-        inet_pton(AF_INET, "10.0.0.2", &iph->ip_src);
-        inet_pton(AF_INET, "1.1.1.1", &iph->ip_dst);
-    }
-    else{
-        tot_sz = data.size() + sizeof(struct ip6_hdr) + transport_hdr_size;
-        packet = std::vector<uint8_t>(tot_sz, 0);
-        transport_hdr_start = packet.data() + sizeof(struct ip6_hdr);
-
-        auto* ip6h = reinterpret_cast<struct ip6_hdr*>(packet.data());
-        ip6h->ip6_vfc = 0x60;
-        ip6h->ip6_plen = htons(static_cast<uint16_t>(transport_hdr_size + data.size()));
-        ip6h->ip6_nxt = (tcp) ? IPPROTO_TCP : IPPROTO_UDP;
-        ip6h->ip6_hlim = 64;
-        inet_pton(AF_INET6, "2001:db8::2", &ip6h->ip6_src);
-        inet_pton(AF_INET6, "2606:4700:4700::1111", &ip6h->ip6_dst);
+[[nodiscard]] bool Utun::configure_utun(){
+    utun_fd_ = ::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+    if(utun_fd_ < 0){
+        LOG_ERROR(logger_, "[UTUN] Socket creation failed (try running with sudo).");
+        return false;
     }
 
-    // transport header
-    if(tcp){
-        data_start = transport_hdr_start + sizeof(tcphdr);
+    // utun_info has the information of the utun. ioctl() puts the id of utun (as the id of the utun
+    // chages everytime on reboot) inside utun_info.
+    ctl_info utun_info{};
+    std::memset(&utun_info, 0, sizeof(utun_info));
+    std::strncpy(utun_info.ctl_name, UTUN_CONTROL_NAME, sizeof(utun_info.ctl_name));
 
-        auto* tcp_hdr = reinterpret_cast<struct tcphdr*>(transport_hdr_start);
-        tcp_hdr->th_sport = htons(53535); // source port
-        tcp_hdr->th_dport = htons(53);    // destination port
-        tcp_hdr->th_seq = htonl(1000);    // seq no.
-        tcp_hdr->th_ack = htonl(0);       // ack no.
-        tcp_hdr->th_off = 5;              // data offset, data starts from byte 5*4 = 20, 5 "words"
-        tcp_hdr->th_x2 = 0;               // reserved bits (idk)
-        tcp_hdr->th_flags = TH_SYN;       // tcp flags
-        tcp_hdr->th_win = htons(65535);   // how much the receiver is currently willing to accept before waiting for ACK
-        tcp_hdr->th_sum = 0;              // checksum
-        tcp_hdr->th_urp = 0;              // urgent pointer (idk)
-    }
-    else{
-        data_start = transport_hdr_start + sizeof(udphdr);
-
-        auto* udp_hdr = reinterpret_cast<struct udphdr*>(transport_hdr_start);
-        udp_hdr->uh_sport = htons(53535);
-        udp_hdr->uh_dport = htons(53);
-        udp_hdr->uh_ulen = htons(static_cast<uint16_t>(sizeof(struct udphdr) + data.size()));
-        udp_hdr->uh_sum = 0;
+    if(ioctl(utun_fd_, CTLIOCGINFO, &utun_info) < 0){
+        LOG_ERROR(logger_, "[UTUN] ioctl() failed.");
+        ::close(utun_fd_);
+        return false;
     }
 
-    std::memcpy(data_start, data.data(), data.size());
+    // sockaddr_ctl -> struct used to establish contact between a user client and a kernel controller (utun
+    // in this case, using the id from utun_info).
+    /*
+        struct sockaddr_ctl {
+            u_char      sc_len;     // depends on size of bundle ID string
+            u_char      sc_family;  // AF_SYSTEM
+            u_int16_t   ss_sysaddr; // AF_SYS_KERNCONTROL
+            u_int32_t   sc_id;      // Controller unique identifier
+            u_int32_t   sc_unit;    // Developer private unit number
+            u_int32_t   sc_reserved[5];
+        };
+    */
+    sockaddr_ctl addr{};
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sc_len = sizeof(addr);
+    addr.sc_family = AF_SYSTEM;
+    addr.ss_sysaddr = AF_SYS_CONTROL;
+    addr.sc_id = utun_info.ctl_id;
+    addr.sc_unit = 0; // 0 means let the OS dynamically assign unit (utun0, utun1, etc.)
 
-    return UtunPacket{
-        // .os_header = static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6),
-        .os_header  = htonl(static_cast<uint32_t>((ipv4) ? AF_INET : AF_INET6)),
-        .raw_packet = std::move(packet)
+    if(::connect(utun_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0){
+        LOG_ERROR(logger_, "[UTUN] Connect to utun failed.");
+        ::close(utun_fd_);
+        return false;
+    }
+
+    char utun_name[IFNAMSIZ];
+    socklen_t utun_name_len = sizeof(utun_name);
+    if(::getsockopt(utun_fd_, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, utun_name, &utun_name_len) < 0){
+        LOG_ERROR(logger_, "[UTUN] Failed to get utun interface name.");
+        ::close(utun_fd_);
+        return false;
+    }
+
+    LOG_INFO(logger_, "[UTUN] Successfully connected to utun, name: {}", utun_name);
+    LOG_INFO(logger_, "[UTUN] Trying to hijack system traffic.");
+
+    if(!configure_utun_v4(asio::ip::make_address_v4("10.8.0.2"), asio::ip::make_address_v4("10.8.0.1"))){
+        LOG_ERROR(logger_, "[UTUN] Failed to configure interface IPs. ioctl fail?");
+        ::close(utun_fd_);
+        return false;
+    }
+
+    if(!configure_utun_v6(asio::ip::make_address_v6("10.8.0.2"), asio::ip::make_address_v6("10.8.0.1"))){
+        LOG_ERROR(logger_, "[UTUN] Failed to configure interface IPs. ioctl fail?");
+        ::close(utun_fd_);
+        return false;
+    }
+
+    utun_name_ = std::string(utun_name);
+    const std::string setup_cmd =
+        "ifconfig " + utun_name_ + " 10.8.0.2 10.8.0.1 up && "
+        "route add -net 0.0.0.0/1 10.8.0.1 > /dev/null 2>&1 && "
+        "route add -net 128.0.0.0/1 10.8.0.1 > /dev/null 2>&1";
+
+    if(std::system(setup_cmd.c_str()) != 0){
+        LOG_ERROR(logger_, "[UTUN] Failed to hijack system traffic.");
+        ::close(utun_fd_);
+        return false;
+    }
+
+    LOG_INFO(logger_, "[UTUN] Successfully hijacked system traffic, routed through: {}", utun_name_);
+    return true;
+}
+
+
+[[nodiscard]] bool Utun::configure_utun_v4(const asio::ip::address_v4& local_ip,
+                                           const asio::ip::address_v4& remote_ip) const{
+    const int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if(sock < 0){
+        return false;
+    }
+
+    ifaliasreq ifra{};
+    std::memset(&ifra, 0, sizeof(ifra));
+    std::strncpy(ifra.ifra_name, utun_name_.c_str(), IFNAMSIZ);
+
+    auto* addr = reinterpret_cast<struct sockaddr_in*>(&ifra.ifra_addr);
+    addr->sin_family = AF_INET;
+    addr->sin_len = sizeof(sockaddr_in);
+    inet_pton(AF_INET, local_ip.to_string().c_str(), &addr->sin_addr);
+
+    auto* dst = reinterpret_cast<struct sockaddr_in*>(&ifra.ifra_broadaddr);
+    dst->sin_family = AF_INET;
+    dst->sin_len = sizeof(sockaddr_in);
+    inet_pton(AF_INET, remote_ip.to_string().c_str(), &dst->sin_addr);
+
+    auto* mask = reinterpret_cast<struct sockaddr_in*>(&ifra.ifra_mask);
+    mask->sin_family = AF_INET;
+    mask->sin_len = sizeof(sockaddr_in);
+    inet_pton(AF_INET, "255.255.255.255", &mask->sin_addr);
+
+    const bool res = (::ioctl(sock, SIOCAIFADDR, &ifra) >= 0);
+    ::close(sock);
+    return res;
+}
+
+
+[[nodiscard]] bool Utun::configure_utun_v6(const asio::ip::address_v6& local_ip,
+                                           const asio::ip::address_v6& remote_ip,
+                                           const int prefix_len) const{
+    const int sock = ::socket(AF_INET6, SOCK_DGRAM, 0);
+    if(sock < 0){
+        return false;
+    }
+
+    in6_aliasreq ifra{};
+    std::memset(&ifra, 0, sizeof(ifra));
+    std::strncpy(ifra.ifra_name, utun_name_.c_str(), IFNAMSIZ);
+
+    ifra.ifra_addr.sin6_family = AF_INET6;
+    ifra.ifra_addr.sin6_len = sizeof(sockaddr_in6);
+    inet_pton(AF_INET6, local_ip.to_string().c_str(), &ifra.ifra_addr.sin6_addr);
+
+    ifra.ifra_dstaddr.sin6_family = AF_INET6;
+    ifra.ifra_dstaddr.sin6_len = sizeof(sockaddr_in6);
+    inet_pton(AF_INET6, remote_ip.to_string().c_str(), &ifra.ifra_dstaddr.sin6_addr);
+
+    ifra.ifra_prefixmask.sin6_family = AF_INET6;
+    ifra.ifra_prefixmask.sin6_len = sizeof(sockaddr_in6);
+    for(int i = 0; i < prefix_len / 8; i++){
+        reinterpret_cast<uint8_t*>(&ifra.ifra_prefixmask.sin6_addr)[i] = 0xFF;
+    }
+    if(prefix_len % 8){
+        reinterpret_cast<uint8_t*>(&ifra.ifra_prefixmask.sin6_addr)[prefix_len / 8] =
+            (0xFF << (8 - (prefix_len % 8))) & 0xFF;
+    }
+
+    ifra.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
+    ifra.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
+
+    const bool res = (::ioctl(sock, SIOCAIFADDR_IN6, &ifra) >= 0);
+    ::close(sock);
+    return res;
+}
+
+
+[[nodiscard]] bool Utun::start_utun() const{
+    int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if(sock < 0){
+        return false;
+    }
+
+    ifreq ifr{};
+    std::memset(&ifr, 0, sizeof(ifr));
+    std::strncpy(ifr.ifr_name, utun_name_.c_str(), IFNAMSIZ);
+
+    if(::ioctl(sock, SIOCGIFFLAGS, &ifr) < 0){
+        ::close(sock);
+        return false;
+    }
+
+    ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
+    const bool res = (::ioctl(sock, SIOCSIFFLAGS, &ifr) >= 0);
+    ::close(sock);
+    return res;
+}
+
+
+[[nodiscard]] bool Utun::toggle_hijack_on(){
+    const RouteConfig routes[] = {
+        {.dest = asio::ip::make_address("0.0.0.0"), .mask = asio::ip::make_address("128.0.0.0"), .gateway = dummy_gateway_ipv4_},
+        {.dest = asio::ip::make_address("128.0.0.0"), .mask = asio::ip::make_address("128.0.0.0"), .gateway = dummy_gateway_ipv4_},
+        {.dest = asio::ip::make_address("::"), .mask = asio::ip::make_address("8000::"), .gateway = dummy_gateway_ipv6_},
+        {.dest = asio::ip::make_address("8000::"), .mask = asio::ip::make_address("8000::"), .gateway = dummy_gateway_ipv6_}
     };
+
+    std::vector<RouteConfig> new_routes;
+    for(const auto& t: routes){
+        if(modify_route(true, t.dest, t.mask, t.gateway)){
+            new_routes.push_back(t);
+        }
+        else{
+            LOG_ERROR(logger_, "[UTUN] Error while adding routes. Trying rollback.");
+            for(auto& [dest, mask, gateway]: new_routes){
+                if(!modify_route(false, dest, gateway, mask)){
+                    LOG_CRITICAL(logger_, "[UTUN] Error while rolling back added routes.");
+                    return false;
+                }
+            }
+            return false;
+        }
+    }
+
+    active_routes_ = new_routes;
+
+    return true;
 }
 
 
-// ! END
-} // namespace utun
+[[nodiscard]] bool Utun::modify_route(const bool enable,
+                                      const asio::ip::address& dest,
+                                      const asio::ip::address& netmaskv4_prefixv6,
+                                      const asio::ip::address& gateway){
+    if(dest.is_v4() != gateway.is_v4())
+        return false;
+
+    if(dest.is_v4()){
+        return modify_route_v4(enable, dest, netmaskv4_prefixv6, gateway);
+    }
+    else{
+        return modify_route_v6(enable, dest, netmaskv4_prefixv6, gateway);
+    }
+}
+
+
+[[nodiscard]] bool Utun::modify_route_v4(const bool enable, const asio::ip::address& dest, const asio::ip::address& netmaskv4_prefixv6, const asio::ip::address& gateway){
+    const int sock = ::socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC);
+    if(sock < 0)
+        return false;
+
+    struct route_msg_v4{
+        rt_msghdr hdr;
+        sockaddr_in dst;
+        sockaddr_in gateway;
+        sockaddr_in mask;
+    } msg{};
+
+    const u_char add_delete = (enable) ? RTM_ADD : RTM_DELETE;
+
+    msg.hdr.rtm_msglen = sizeof(msg);
+    msg.hdr.rtm_version = RTM_VERSION;
+    msg.hdr.rtm_type = add_delete;
+    msg.hdr.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
+    msg.hdr.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK;
+    msg.hdr.rtm_pid = ::getpid();
+
+    // dest
+    msg.dst.sin_family = AF_INET;
+    msg.dst.sin_len = sizeof(struct sockaddr_in);
+    const auto dst_bytes = dest.to_v4().to_bytes();
+    std::memcpy(&msg.dst.sin_addr, dst_bytes.data(), dst_bytes.size());
+
+    // gateway
+    msg.gateway.sin_family = AF_INET;
+    msg.gateway.sin_len = sizeof(struct sockaddr_in);
+    const auto gw_bytes = gateway.to_v4().to_bytes();
+    std::memcpy(&msg.gateway.sin_addr, gw_bytes.data(), gw_bytes.size());
+
+    // netmask
+    msg.mask.sin_family = AF_INET;
+    msg.mask.sin_len = sizeof(struct sockaddr_in);
+    const auto mask_bytes = netmaskv4_prefixv6.to_v4().to_bytes();
+    std::memcpy(&msg.mask.sin_addr, mask_bytes.data(), mask_bytes.size());
+
+    const bool ret = (::write(sock, &msg, sizeof(msg)) > 0);
+    ::close(sock);
+    return ret;
+}
+
+
+[[nodiscard]] bool Utun::modify_route_v6(const bool enable, const asio::ip::address& dest, const asio::ip::address& netmaskv4_prefixv6, const asio::ip::address& gateway){
+    const int sock = ::socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC);
+    if(sock < 0)
+        return false;
+
+    struct route_msg_v6{
+        rt_msghdr hdr;
+        sockaddr_in6 dst;
+        sockaddr_in6 gateway;
+        sockaddr_in6 mask;
+    } msg{};
+
+    const u_char add_delete = (enable) ? RTM_ADD : RTM_DELETE;
+
+    msg.hdr.rtm_msglen = sizeof(msg);
+    msg.hdr.rtm_version = RTM_VERSION;
+    msg.hdr.rtm_type = add_delete;
+    msg.hdr.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
+    msg.hdr.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK;
+    msg.hdr.rtm_pid = ::getpid();
+
+    // dest
+    msg.dst.sin6_family = AF_INET6;
+    msg.dst.sin6_len = sizeof(struct sockaddr_in6);
+    const auto dst_bytes = dest.to_v6().to_bytes();
+    std::memcpy(&msg.dst.sin6_addr, dst_bytes.data(), dst_bytes.size());
+
+    // gateway
+    msg.gateway.sin6_family = AF_INET6;
+    msg.gateway.sin6_len = sizeof(struct sockaddr_in6);
+    const auto gw_bytes = gateway.to_v6().to_bytes();
+    std::memcpy(&msg.gateway.sin6_addr, gw_bytes.data(), gw_bytes.size());
+
+    // netmask
+    msg.mask.sin6_family = AF_INET6;
+    msg.mask.sin6_len = sizeof(struct sockaddr_in6);
+    const auto mask_bytes = netmaskv4_prefixv6.to_v6().to_bytes();
+    std::memcpy(&msg.mask.sin6_addr, mask_bytes.data(), mask_bytes.size());
+
+    const bool ret = (::write(sock, &msg, sizeof(msg)) > 0);
+    ::close(sock);
+    return ret;
+}

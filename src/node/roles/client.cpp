@@ -1,71 +1,69 @@
 #include "src/node/roles/client.hpp"
-#include "src/network/sockets/utun.hpp"
 #include "src/network/packets/packets.hpp"
+#include "src/network/sockets/utun.hpp"
 
-#include <iostream>
-#include <vector>
-#include <string>
-#include <thread>
 #include <random>
-#include <unistd.h>
+#include <string>
+#include <vector>
 
 #include <boost/asio.hpp>
+
+#include <quill/LogMacros.h>
 
 namespace asio = boost::asio;
 
 
 Client::Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socket):
     ioc_(ioc),
-    utun_stream_(ioc_),
     udp_socket_(udp_socket),
-    ci_computing_strand_(asio::make_strand(ioc_)){}
+    utun_stream_(ioc_),
+    ci_computing_strand_(asio::make_strand(ioc_)){
+    logger_ = quill::Frontend::get_logger("client_logger");
+}
 
 
 Client::~Client(){
-    if(utun_sockfd_ >= 0){
-        //* close_utun();
-        close(utun_sockfd_);
+    if(running_.load()){
+        stop();
     }
 }
 
 
-void Client::start(){
-    // todo: connect_control_server();
-
-    // todo: utun_sockfd_ = setup_tun();
-
-    // ! START: simulating utun traffic
-    int utun_create_fd = -1;
-    try{
-        std::tie(utun_create_fd, utun_sockfd_) = utun::dummy_tun();
-    }
-    catch([[maybe_unused]] const std::runtime_error& e){
-        return;
+[[nodiscard]] bool Client::start(){
+    if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
+        LOG_ERROR(logger_, "Called start() more than once.");
+        return false;
     }
 
-    std::thread worker(utun::simulate_utun, utun_create_fd);
-    if(worker.joinable())
-        worker.detach();
-    // ! END
+    // todo: connect_control_server(), connect_peers() etc;
 
-    start_utun();
-}
+    if(!utun_.start()){
+        LOG_ERROR(logger_, "Failed to start utun.");
+        return false;
+    }
 
+    utun_sockfd_ = utun_.get_fd();
 
-void Client::start_utun(){
     boost::system::error_code ec;
-
     if(utun_stream_.assign(utun_sockfd_, ec)){
-        std::cerr << "[Tun Worker] Failed to convert utun_sockfd_ to asio stream_descriptor" << std::endl;
-        return;
+        LOG_ERROR(logger_, "Failed to convert utun_sockfd_ to asio stream_descriptor.");
+        return false;
     }
 
+    start_listening_utun();
+
+    LOG_INFO(logger_, "Started successfully.");
+    return true;
+}
+
+
+inline void Client::start_listening_utun(){
     std::shared_ptr<utun::RawPacket> raw_packet = std::make_shared<utun::RawPacket>();
     read_packet(raw_packet);
 }
 
 
-void Client::read_packet(std::shared_ptr<utun::RawPacket> raw_packet){
+void Client::read_packet(const std::shared_ptr<utun::RawPacket>& raw_packet){
     // TODO: check if this reads whole packet. if it doesn't, how do we make it read the whole packet?
     utun_stream_.async_read_some(
         asio::buffer(raw_packet->payload),
@@ -77,9 +75,9 @@ void Client::read_packet(std::shared_ptr<utun::RawPacket> raw_packet){
 }
 
 
-void Client::loop_utun(std::shared_ptr<utun::RawPacket> raw_packet, boost::system::error_code const& ec){
+void Client::loop_utun(const std::shared_ptr<utun::RawPacket>& raw_packet, boost::system::error_code const& ec){
     if(ec){
-        std::cerr << "[Tun Worker] Raw packet read failed: " << ec.message() << std::endl;
+        LOG_ERROR(logger_, "Raw packet read failed: {}", ec.message());
         return;
     }
 
@@ -98,7 +96,7 @@ void Client::loop_utun(std::shared_ptr<utun::RawPacket> raw_packet, boost::syste
 // multithread_care
 asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet){
     if(!raw_packet->parse_packet()){
-        std::cerr << "[Tun Worker] Dropping faulty packet." << std::endl;
+        LOG_ERROR(logger_, "Dropping faulty packet.");
         co_return;
     }
 
@@ -126,10 +124,10 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
         ci = co_await make_new_circuit(nt);
     }
 
-    auto relay = choose_relay(ci);
+    const auto relay = choose_relay(ci);
 
-    auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN_SZ;
-    std::shared_ptr<ClientFullHeaders> headers = std::make_shared<ClientFullHeaders>(ClientFullHeaders{
+    const auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN_SZ;
+    auto headers = std::make_shared<ClientFullHeaders>(ClientFullHeaders{
         .route_flag = RoutingFlag::CLIENT_TO_RELAY,
         .session_id = relay->session_id,
         .thdr{
@@ -150,7 +148,7 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
 
     // todo: encrypt sh_ce, sh_cr
     size_t outgoing_bytes = sizeof(ClientFullHeaders) + app_internal_bytes;
-    std::array<asio::const_buffer, 2> outgoing = {
+    const std::array<asio::const_buffer, 2> outgoing = {
         asio::buffer(headers.get(), sizeof(ClientFullHeaders)),
         asio::buffer(raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes)
     };
@@ -160,13 +158,13 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
         relay->endpoint,
         // raw_packet and headers in the lambda to make sure it doesn't get destroyed
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [keep_alive1 = raw_packet, keep_alive2 = headers, outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
+        [keep_alive1 = raw_packet, keep_alive2 = headers, me=shared_from_this(), outgoing_bytes](const boost::system::error_code& ec, std::size_t bytes_xfer){
             if(ec){
-                std::cerr << "[TUN Worker] Send failed: " << ec.message() << std::endl;
+                LOG_ERROR(me->logger_, "[TUN Worker] Send failed: {}", ec.message());
                 return;
             }
             if(bytes_xfer != outgoing_bytes){
-                std::cerr << "[TUN Worker] Bytes sent mismatch: UDP socket fail?" << std::endl;
+                LOG_ERROR(me->logger_, "[TUN Worker] Bytes sent mismatch: UDP socket fail?");
                 return;
             }
         }
@@ -187,8 +185,8 @@ asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit(const Net
 // stranded
 asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(const NetworkTuple& nt){
     // NOT PIONEER PACKETS
-    if(auto it = ci_computing_.find(nt); it != ci_computing_.end()){
-        auto chan = it->second;
+    if(const auto it = ci_computing_.find(nt); it != ci_computing_.end()){
+        const auto chan = it->second;
         co_return co_await chan->async_receive(asio::use_awaitable);
     }
     // if already completed when we were competing for the strand
@@ -216,7 +214,7 @@ asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(co
     nt_ci_umap_.put(nt, std::move(ci));
     auto val = nt_ci_umap_.get(nt);
 
-    auto active_chan = std::move(ci_computing_[nt]);
+    const auto active_chan = std::move(ci_computing_[nt]);
     ci_computing_.erase(nt);
     while(active_chan->ready()){
         active_chan->try_send(boost::system::error_code{}, val);
@@ -227,7 +225,20 @@ asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(co
 }
 
 
-std::shared_ptr<RelayInfo> Client::choose_relay(std::shared_ptr<CircuitInfo> ci){
+std::shared_ptr<RelayInfo> Client::choose_relay(const std::shared_ptr<CircuitInfo>& ci){
     // TODO: scheduling
     return ci->relays[0];
+}
+
+
+
+void Client::stop(){
+    if(bool expected = true; running_.compare_exchange_strong(expected, false) == false){
+        LOG_ERROR(logger_, "Called stop() more than once.");
+        return;
+    }
+
+    utun_.stop();
+
+    // TODO: signal relays/exit
 }

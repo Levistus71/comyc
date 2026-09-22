@@ -1,9 +1,9 @@
 #pragma once
 
+#include "src/network/sockets/utun.hpp"
 #include "src/network/packets/cell.hpp"
 #include "src/network/packets/packets.hpp"
 #include "src/node/node_utils.hpp"
-#include "src/node/node.hpp"
 
 #include <vector>
 #include <shared_mutex>
@@ -11,6 +11,8 @@
 #include <boost/asio.hpp>
 #include <boost/container_hash/hash.hpp>
 #include <boost/asio/experimental/channel.hpp>
+
+#include <quill/Frontend.h>
 
 namespace asio = boost::asio;
 
@@ -101,10 +103,17 @@ public:
     ~Client();
 
 
-    void start();
+    Client(const Client& other) = delete;
 
 
-    // auto stop();
+    Client& operator=(const Client& other) = delete;
+
+
+    [[nodiscard]] bool start();
+
+
+    void stop();
+
 
     void process_incoming_packet(std::shared_ptr<IncomingCell> packet);
 
@@ -112,21 +121,26 @@ private:
     asio::io_context& ioc_;
     asio::ip::udp::socket& udp_socket_;
 
+    std::atomic<bool> running_;
+
     asio::posix::stream_descriptor utun_stream_;
     std::atomic<int> utun_sockfd_ = -1;
+    Utun utun_;
 
     RCU_UMap<NetworkTuple, CircuitInfo> nt_ci_umap_;
     asio::strand<asio::io_context::executor_type> ci_computing_strand_;
     std::unordered_map<NetworkTuple, std::shared_ptr<CircuitChannel>> ci_computing_; // stranded
 
-
-    void start_utun();
-
-
-    void read_packet(std::shared_ptr<utun::RawPacket> raw_packet);
+    quill::Logger* logger_{nullptr};
 
 
-    void loop_utun(std::shared_ptr<utun::RawPacket> raw_packet, boost::system::error_code const& ec);
+    inline void start_listening_utun();
+
+
+    void read_packet(const std::shared_ptr<utun::RawPacket>& raw_packet);
+
+
+    void loop_utun(const std::shared_ptr<utun::RawPacket>& raw_packet, boost::system::error_code const& ec);
 
 
     asio::awaitable<void> process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet);
@@ -138,5 +152,5 @@ private:
     asio::awaitable<std::shared_ptr<CircuitInfo>> make_new_circuit_helper(const NetworkTuple& nt);
 
 
-    std::shared_ptr<RelayInfo> choose_relay(std::shared_ptr<CircuitInfo> ci);
+    std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);
 };

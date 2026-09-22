@@ -1,21 +1,64 @@
 #include "src/node/node.hpp"
 
-#include <iostream>
+#include "quill/LogMacros.h"
+#include "quill/Frontend.h"
 
 
-Node::Node():
+Node::Node(asio::io_context& ioc, const NodeRole role):
+    role_(role),
+    ioc_(ioc),
     udp_socket_(ioc_),
-    listening_endpoint_(asio::ip::udp::endpoint(asio::ip::udp::v4(), 12345)){}
+    listening_endpoint_(asio::ip::udp::endpoint(asio::ip::udp::v4(), 12345)){
+    logger_ = quill::Frontend::get_logger("node_logger");
+
+    // todo: start client, start relay, start exit? based on the role.
+    if(static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::CLIENT))
+        client_ = std::make_shared<Client>(ioc_, udp_socket_);
+
+    if(static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::RELAY))
+        relay_ = std::make_shared<Relay>(ioc_, udp_socket_);
+
+    if(static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::EXIT))
+        exit_ = std::make_shared<Exit>();
+}
 
 
 void Node::start(){
+    if(client_ != nullptr)
+        client_->start();
+
+    if(relay_ != nullptr)
+        relay_->start();
+
+    if(exit_ != nullptr)
+        exit_->start();
+
     auto first_packet = std::make_shared<IncomingCell>();
     listen(first_packet);
 }
 
 
+void Node::stop(){
+    if(client_ != nullptr)
+        client_->stop();
+
+    if(relay_ != nullptr)
+        relay_->stop();
+
+    if(exit_ != nullptr)
+        exit_->stop();
+
+    boost::system::error_code ec;
+    udp_socket_.close(ec);
+
+    if(ec){
+        LOG_ERROR(logger_, "Error closing udp socket: {}", ec.message());
+    }
+}
+
+
 void Node::listen(std::shared_ptr<IncomingCell> packet){
-    auto ignore = std::make_shared<asio::ip::udp::endpoint>();
+    auto ignore = std::make_shared<asio::ip::udp::endpoint>(); // optimize: shared_ptr on every packet read is costly, make it a member?
     udp_socket_.async_receive_from(
         asio::buffer(packet->payload),
         (*ignore),
@@ -29,7 +72,7 @@ void Node::listen(std::shared_ptr<IncomingCell> packet){
 
 void Node::loop_listen(std::shared_ptr<IncomingCell> packet, const boost::system::error_code& ec){
     if(ec){
-        std::cerr << "[Node] Packet receive failed in loop_listen(): " << ec.message() << std::endl;
+        LOG_ERROR(logger_, "Packet receive failed in loop_listen(): {}", ec.message());
         return;
     }
 
@@ -42,7 +85,7 @@ void Node::loop_listen(std::shared_ptr<IncomingCell> packet, const boost::system
 
 void Node::route_packet(std::shared_ptr<IncomingCell> packet){
     if(packet->bytes_received < sizeof(RoutingFlag)){
-        std::cerr << "[Node] Dropping faulty packet, route_packet, size<1." << std::endl;
+        LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<1.");
         return;
     }
     packet->route_flag = static_cast<RoutingFlag>(packet->payload[0]);
@@ -73,7 +116,7 @@ void Node::route_packet(std::shared_ptr<IncomingCell> packet){
             return;
         }
         default: {
-            std::cerr << "[Node] Dropping faulty packet, invalid routing flag." << std::endl;
+            LOG_WARNING(logger_, "Dropping faulty packet, invalid routing flag.");
             return;
         }
     }

@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Boost REQUIRED COMPONENTS headers system)
+find_package(quill REQUIRED)
+
 find_package(Threads REQUIRED)  # required by boost
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
@@ -19,7 +21,7 @@ add_library(network
         src/network/packets/packets.cpp
         src/network/sockets/utun.cpp
 )
-target_link_libraries(network PRIVATE encryption Boost::headers)
+target_link_libraries(network PRIVATE encryption Boost::headers quill::quill)
 
 # NODE APP
 add_executable(node_app
@@ -29,4 +31,4 @@ add_executable(node_app
         src/node/roles/relay.cpp
 )
 set_target_properties(node_app PROPERTIES OUTPUT_NAME "node")
-target_link_libraries(node_app PRIVATE network Boost::headers)
+target_link_libraries(node_app PRIVATE network Boost::headers quill::quill)
