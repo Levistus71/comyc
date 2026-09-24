@@ -2,21 +2,13 @@
 
 #include <memory>
 
-Exit::Exit(){
-
-}
+Exit::Exit(){}
 
 
-void Exit::start(){
-
-}
+void Exit::start(){}
 
 
-void Exit::stop(){
-
-}
+void Exit::stop(){}
 
 
-void Exit::process_incoming_packet(std::shared_ptr<IncomingCell> packet){
-
-}
+void Exit::process_incoming_packet(std::shared_ptr<IncomingCell> packet){}

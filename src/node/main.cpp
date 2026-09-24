@@ -6,7 +6,6 @@
 #include <quill/LogMacros.h>
 
 
-
 static void setup_loggers(){
     auto file_sink = quill::Frontend::create_or_get_sink<quill::FileSink>(
         "logs.txt",

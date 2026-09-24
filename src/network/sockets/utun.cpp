@@ -70,7 +70,7 @@ void Utun::stop(){
     }
 
     if(utun_fd_ >= 0){
-        if(::close(utun_fd_)<0){
+        if(::close(utun_fd_) < 0){
             LOG_CRITICAL(logger_, "[UTUN] close(utun_fd_) failed. probably data corruption/multithread fail.");
         }
         utun_fd_ = -1;

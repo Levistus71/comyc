@@ -19,6 +19,7 @@ void Relay::start(){
     // todo: actual start up idk what to do here
 }
 
+
 void Relay::stop(){
     // todo: signal clients about exit
 }
@@ -80,7 +81,7 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
         asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
     };
 
-    asio::ip::udp::socket& sock = (exit_info->endpoint.protocol()==asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+    asio::ip::udp::socket& sock = (exit_info->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
     sock.async_send_to(
         outgoing,
@@ -161,7 +162,7 @@ asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> pac
         asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
     };
 
-    asio::ip::udp::socket& sock = (client_info->endpoint.protocol()==asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+    asio::ip::udp::socket& sock = (client_info->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
     sock.async_send_to(
         outgoing,
@@ -169,7 +170,7 @@ asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> pac
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
         [me=shared_from_this(), keep_alive = packet, keep_alive2 = outgoing, keep_alive3 = client_info]
-        (const boost::system::error_code& ec, size_t bytes_xfer){
+    (const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "Exit send failed: {}", ec.message());
                 return;

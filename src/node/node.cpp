@@ -27,7 +27,7 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
 
 
 [[nodiscard]] bool Node::start(){
-    if(bool expected = false; running_.compare_exchange_strong(expected, true)==false){
+    if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
         LOG_ERROR(logger_, "start() called when running_.");
         return false;
     }
