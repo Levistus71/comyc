@@ -97,7 +97,7 @@ using CircuitChannel = asio::experimental::channel<
 
 class Client : public std::enable_shared_from_this<Client>{
 public:
-    Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socket);
+    Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socketv4, asio::ip::udp::socket& udp_socketv6);
 
 
     ~Client();
@@ -119,7 +119,8 @@ public:
 
 private:
     asio::io_context& ioc_;
-    asio::ip::udp::socket& udp_socket_;
+    asio::ip::udp::socket& udp_socketv4_;
+    asio::ip::udp::socket& udp_socketv6_;
 
     std::atomic<bool> running_;
 

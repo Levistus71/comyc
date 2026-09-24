@@ -1,6 +1,5 @@
 #include "src/network/sockets/utun.hpp"
 
-#include <iostream>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/kern_control.h>
@@ -13,6 +12,7 @@
 #include <netinet6/in6_var.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <ifaddrs.h>
 
 #include <string>
 #include <boost/asio.hpp>
@@ -34,6 +34,25 @@ Utun::~Utun(){
 
 
 void Utun::stop(){
+    std::lock_guard<std::mutex> lock(route_update_mutex_);
+
+    bool cleared_all = true;
+    for(const auto& r: active_routes_){
+        if(!modify_route(false, r.dest, r.mask, r.gateway)){
+            cleared_all = false;
+        }
+    }
+    active_routes_.clear();
+
+    if(!cleared_all){
+        LOG_CRITICAL(logger_, "[UTUN] Couldn't erase all routes. Cannot guarantee network recovery. Suggest rebooting.");
+        // try clear hijack atleast
+        ::system("sudo route -q delete -net 0.0.0.0/1 > /dev/null 2>&1");
+        ::system("sudo route -q delete -net 128.0.0.0/1 > /dev/null 2>&1");
+        ::system("sudo route -q delete -inet6 -net ::/1 > /dev/null 2>&1");
+        ::system("sudo route -q delete -inet6 -net 8000::/1 > /dev/null 2>&1");
+    }
+
     /*
         val.compare_exchange_strong(&expected, desired)
         if(val==expected){
@@ -50,29 +69,14 @@ void Utun::stop(){
         return;
     }
 
-    bool cleared_all = true;
-    for(const auto& r: active_routes_){
-        if(!modify_route(false, r.dest, r.mask, r.gateway)){
-            cleared_all = false;
-        }
-    }
-    active_routes_.clear();
-
     if(utun_fd_ >= 0){
-        ::close(utun_fd_);
+        if(::close(utun_fd_)<0){
+            LOG_CRITICAL(logger_, "[UTUN] close(utun_fd_) failed. probably data corruption/multithread fail.");
+        }
         utun_fd_ = -1;
     }
 
-    if(!cleared_all){
-        LOG_CRITICAL(logger_, "[UTUN] Couldn't erase all routes. Cannot guarantee network recovery.");
-        ::system("sudo route -q delete -net 0.0.0.0/1 > /dev/null 2>&1");
-        ::system("sudo route -q delete -net 128.0.0.0/1 > /dev/null 2>&1");
-        ::system("sudo route -q delete -inet6 -net ::/1 > /dev/null 2>&1");
-        ::system("sudo route -q delete -inet6 -net 8000::/1 > /dev/null 2>&1");
-        return;
-    }
-
-    LOG_INFO(logger_, "[UTUN] Stopped successfully.");
+    LOG_INFO(logger_, "[UTUN] Stopped.");
 }
 
 
@@ -94,6 +98,8 @@ void Utun::stop(){
         return false;
     }
 
+    std::lock_guard<std::mutex> lock(route_update_mutex_);
+
     if(!configure_utun()){
         LOG_ERROR(logger_, "[UTUN] configure_utun() failed.");
         stop();
@@ -112,7 +118,6 @@ void Utun::stop(){
         return false;
     }
 
-    LOG_INFO(logger_, "[UTUN] Started successfully.");
     return true;
 }
 
@@ -276,7 +281,7 @@ int Utun::get_fd() const{
 
     // const bool res = (::ioctl(sock, SIOCAIFADDR_IN6, &ifra) >= 0);
     const int x = ::ioctl(sock, SIOCAIFADDR_IN6, &ifra);
-    if(x<0){
+    if(x < 0){
         const int err = errno;
         LOG_ERROR(logger_, "[UTUN] ioctl() fail. err: {}", errno);
     }
@@ -308,6 +313,8 @@ int Utun::get_fd() const{
 
 
 [[nodiscard]] bool Utun::toggle_hijack_on(){
+    // called from start(), don't need lock.
+
     const RouteConfig routes[] = {
         {.dest = asio::ip::make_address("0.0.0.0"), .mask = asio::ip::make_address("128.0.0.0"), .gateway = dummy_gateway_ipv4_},
         {.dest = asio::ip::make_address("128.0.0.0"), .mask = asio::ip::make_address("128.0.0.0"), .gateway = dummy_gateway_ipv4_},
@@ -323,7 +330,7 @@ int Utun::get_fd() const{
         else{
             LOG_ERROR(logger_, "[UTUN] Error while adding routes. Trying rollback.");
             for(auto& [dest, mask, gateway]: new_routes){
-                if(!modify_route(false, dest, gateway, mask)){
+                if(!modify_route(false, dest, mask, gateway)){
                     LOG_CRITICAL(logger_, "[UTUN] Error while rolling back added routes.");
                     return false;
                 }
@@ -332,7 +339,8 @@ int Utun::get_fd() const{
         }
     }
 
-    active_routes_ = new_routes;
+    for(auto& t: new_routes)
+        active_routes_.insert(t);
 
     return true;
 }
@@ -444,31 +452,172 @@ int Utun::get_fd() const{
 }
 
 
-[[nodiscard]] bool Utun::bind_to_en0(asio::ip::udp::socket& socket,
-                                     const std::string& interface_name,
-                                     boost::system::error_code& ec){
-    ec.clear();
+// [[nodiscard]] bool Utun::bind_to_en0(asio::ip::udp::socket& socket,
+//                                      const std::string& interface_name,
+//                                      boost::system::error_code& ec){
+//     ec.clear();
+//
+//     const unsigned int if_index = ::if_nametoindex(interface_name.c_str());
+//     if(if_index == 0){
+//         return false;
+//     }
+//
+//     const int fd = socket.native_handle();
+//
+//     if(socket.local_endpoint(ec).protocol() == asio::ip::udp::v4() || !ec){
+//         if(::setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &if_index, sizeof(if_index)) < 0){
+//             ec = boost::system::error_code(errno, boost::system::generic_category());
+//             return false;
+//         }
+//     }
+//
+//     if(socket.local_endpoint(ec).protocol() == asio::ip::udp::v6() || !ec){
+//         if(::setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &if_index, sizeof(if_index)) < 0){
+//             ec = boost::system::error_code(errno, boost::system::generic_category());
+//             return false;
+//         }
+//     }
+//
+//     return true;
+// }
 
-    const unsigned int if_index = ::if_nametoindex(interface_name.c_str());
-    if(if_index == 0){
+// [[nodiscard]] bool Utun::bind_to_en0(asio::ip::udp::socket& socket,
+//                                      const std::string& interface_name,
+//                                      boost::system::error_code& ec) const{
+//     ec.clear();
+//
+//     const unsigned int if_index = ::if_nametoindex(interface_name.c_str());
+//     if(if_index == 0){
+//         LOG_ERROR(logger_, "[UTUN] if_nametoindex() failed.");
+//         ec = boost::system::error_code(ENXIO, boost::system::generic_category());
+//         return false;
+//     }
+//
+//     ifaddrs* ifaddr = nullptr;
+//     if(::getifaddrs(&ifaddr) < 0){
+//         LOG_ERROR(logger_, "[UTUN] getifaddrs() failed.");
+//         ec = boost::system::error_code(errno, boost::system::generic_category());
+//         return false;
+//     }
+//
+//     const bool is_v6 = (socket.local_endpoint(ec).protocol() == asio::ip::udp::v6());
+//     if(ec){
+//         LOG_ERROR(logger_, "[UTUN] couldn't get socket's ip protocol. socket.local_endpoint().protocol() failed.");
+//         ::freeifaddrs(ifaddr);
+//         return false;
+//     }
+//
+//     const int target_family = is_v6 ? AF_INET6 : AF_INET;
+//     asio::ip::udp::endpoint bind_endpoint;
+//     bool found = false;
+//
+//     for(ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next){
+//         if(ifa->ifa_addr == nullptr)
+//             continue;
+//         if(ifa->ifa_name != interface_name)
+//             continue;
+//         if(ifa->ifa_addr->sa_family != target_family)
+//             continue;
+//
+//         if(is_v6){
+//             auto* sa = reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
+//             char host[INET6_ADDRSTRLEN];
+//             if(inet_ntop(AF_INET6, &(sa->sin6_addr), host, INET6_ADDRSTRLEN)){
+//                 boost::system::error_code other_ec;
+//                 LOG_DEBUG(logger_, "[UTUN] ipv6 interface,host : {},{}", interface_name, host);
+//                 auto addr_v6 = asio::ip::make_address_v6(host, other_ec);
+//                 if(!other_ec){
+//                     // idk about this link local shi
+//                     if(addr_v6.is_link_local()){
+//                         addr_v6.scope_id(if_index);
+//                     }
+//                     bind_endpoint = asio::ip::udp::endpoint(addr_v6, 0);
+//                     found = true;
+//                     // idk
+//                     if(!addr_v6.is_link_local()){
+//                         break;
+//                     }
+//                 }
+//             }
+//         }
+//         else{
+//             auto* sa = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+//             char host[INET_ADDRSTRLEN];
+//             if(inet_ntop(AF_INET, &(sa->sin_addr), host, INET_ADDRSTRLEN)){
+//                 LOG_DEBUG(logger_, "[UTUN] ipv4 interface,host : {},{}", interface_name, host);
+//                 bind_endpoint = asio::ip::udp::endpoint(asio::ip::make_address(host), 0);
+//                 found = true;
+//                 break;
+//             }
+//         }
+//     }
+//
+//     freeifaddrs(ifaddr);
+//
+//     if(!found){
+//         LOG_ERROR(logger_, "[UTUN] Couldn't find interface / interface's ip address.");
+//         ec = boost::system::error_code(ENXIO, boost::system::generic_category());
+//         return false;
+//     }
+//
+//     socket.bind(bind_endpoint, ec);
+//     if(ec){
+//         LOG_ERROR(logger_, "[UTUN] socket.bind() failed: {} ({})", ec.message(), ec.value());
+//         return false;
+//     }
+//     return true;
+// }
+
+
+[[nodiscard]] bool Utun::add_del_route(const bool add,
+                                       const asio::ip::address& dest,
+                                       const asio::ip::address& netmaskv4_prefixv6,
+                                       const asio::ip::address& gateway){
+    if(dest.is_v4() != gateway.is_v4()){
+        LOG_ERROR(logger_, "[UTUN] destination and gateway ip protocols don't match.");
         return false;
     }
 
-    const int fd = socket.native_handle();
+    std::lock_guard<std::mutex> lock(route_update_mutex_);
 
-    if(socket.local_endpoint(ec).protocol() == asio::ip::udp::v4() || !ec){
-        if(::setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &if_index, sizeof(if_index)) < 0){
-            ec = boost::system::error_code(errno, boost::system::generic_category());
-            return false;
+    bool ip_v4 = dest.is_v4();
+    RouteConfig route{
+        .dest    = dest,
+        .mask    = netmaskv4_prefixv6,
+        .gateway = gateway
+    };
+
+
+    if(add){
+        if(active_routes_.contains(route))
+            return true;
+
+        bool updated;
+        if(ip_v4)
+            updated = modify_route_v4(add, dest, netmaskv4_prefixv6, gateway);
+        else
+            updated = modify_route_v6(add, dest, netmaskv4_prefixv6, gateway);
+
+        if(updated){
+            active_routes_.insert(route);
+            return true;
         }
+        return false;
     }
+    else{
+        if(!active_routes_.contains(route))
+            return true;
 
-    if(socket.local_endpoint(ec).protocol() == asio::ip::udp::v6() || !ec){
-        if(::setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &if_index, sizeof(if_index)) < 0){
-            ec = boost::system::error_code(errno, boost::system::generic_category());
-            return false;
+        bool updated;
+        if(ip_v4)
+            updated = modify_route_v4(add, dest, netmaskv4_prefixv6, gateway);
+        else
+            updated = modify_route_v6(add, dest, netmaskv4_prefixv6, gateway);
+
+        if(updated){
+            active_routes_.erase(route);
+            return true;
         }
+        return false;
     }
-
-    return true;
 }

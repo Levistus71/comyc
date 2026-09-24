@@ -4,9 +4,10 @@
 #include <quill/Frontend.h>
 
 
-Relay::Relay(asio::io_context& ioc, asio::ip::udp::socket& sock):
+Relay::Relay(asio::io_context& ioc, asio::ip::udp::socket& sockv4, asio::ip::udp::socket& sockv6):
     ioc_(ioc),
-    udp_socket_(sock){
+    udp_socketv4_(sockv4),
+    udp_socketv6_(sockv6){
     logger_ = quill::Frontend::get_logger("relay_logger");
 }
 
@@ -79,7 +80,9 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
         asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
     };
 
-    udp_socket_.async_send_to(
+    asio::ip::udp::socket& sock = (exit_info->endpoint.protocol()==asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+
+    sock.async_send_to(
         outgoing,
         exit_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
@@ -158,7 +161,9 @@ asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> pac
         asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
     };
 
-    udp_socket_.async_send_to(
+    asio::ip::udp::socket& sock = (client_info->endpoint.protocol()==asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+
+    sock.async_send_to(
         outgoing,
         client_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.

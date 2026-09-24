@@ -26,7 +26,7 @@ struct ClientInfo{
 
 class Relay : public std::enable_shared_from_this<Relay>{
 public:
-    Relay(asio::io_context& ioc, asio::ip::udp::socket& sock);
+    Relay(asio::io_context& ioc, asio::ip::udp::socket& sockv4, asio::ip::udp::socket& sockv6);
 
 
     ~Relay();
@@ -45,7 +45,8 @@ public:
 
 private:
     asio::io_context& ioc_;
-    asio::ip::udp::socket& udp_socket_;
+    asio::ip::udp::socket& udp_socketv4_;
+    asio::ip::udp::socket& udp_socketv6_;
     RCU_UMap<session_id_t, ExitInfo> sid_ei_umap_;
     RCU_UMap<circuit_id_t, ClientInfo> cid_ci_umap_;
     quill::Logger* logger_{nullptr};

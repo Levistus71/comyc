@@ -16,14 +16,22 @@ endif()
 
 # release flags
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
-# debug flags (macOS)
+
+
+# debug flags. uncomment either asan or tsan.
+# asan
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined")
 set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=address,undefined")
+# tsan
+#set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -fno-omit-frame-pointer -fsanitize=thread")
+#set(CMAKE_EXE_LINKER_FLAGS_DEBUG "-fsanitize=thread")
 
-# Optional: Uncomment below to enable ThreadSanitizer on macOS
-# (Note: TSan requires a clean build folder and can sometimes conflict with certain system libraries)
-# set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=thread")
-# set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=thread")
+
+# QUILL
+add_compile_definitions(
+        -DQUILL_COMPILE_ACTIVE_LOG_LEVEL=$<IF:$<CONFIG:Debug>,QUILL_COMPILE_ACTIVE_LOG_LEVEL_DEBUG,QUILL_COMPILE_ACTIVE_LOG_LEVEL_INFO>
+)
+
 
 find_package(Boost REQUIRED COMPONENTS headers system)
 find_package(quill REQUIRED)

@@ -82,8 +82,11 @@ int main(){
     // fixme: role should be decided dynamically
     constexpr auto role = NodeRole::CLIENT_RELAY;
     const auto node = std::make_shared<Node>(ioc, role);
-    LOG_INFO(main_logger, "Node starting.");
-    node->start();
+    LOG_INFO(main_logger, "Trying node->start().");
+    if(!node->start()){
+        LOG_ERROR(main_logger, "Node couldn't start. Aborting.");
+        return 1;
+    }
     LOG_INFO(main_logger, "Node started.");
 
     // capture signints or sigterms (for clean exit, communicate with relays/exit, kill utun etc)

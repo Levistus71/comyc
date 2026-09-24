@@ -2,11 +2,45 @@
 
 #include <atomic>
 #include <string>
+#include <unordered_set>
+
 #include <quill/Frontend.h>
 
 #include <boost/asio.hpp>
 
 namespace asio = boost::asio;
+
+
+struct RouteConfig{
+    asio::ip::address dest;
+    asio::ip::address mask;
+    asio::ip::address gateway;
+
+
+    bool operator==(const RouteConfig& other) const{
+        return dest == other.dest &&
+               mask == other.mask &&
+               gateway == other.gateway;
+    }
+};
+
+
+namespace std{
+template<>
+struct hash<RouteConfig>{
+    std::size_t operator()(const RouteConfig& config) const noexcept{
+        std::size_t h1 = std::hash<std::string>{}(config.dest.to_string());
+        std::size_t h2 = std::hash<std::string>{}(config.mask.to_string());
+        std::size_t h3 = std::hash<std::string>{}(config.gateway.to_string());
+
+        std::size_t seed = h1;
+        seed ^= h2 + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= h3 + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+
+        return seed;
+    }
+};
+}
 
 
 class Utun{
@@ -32,25 +66,31 @@ public:
     [[nodiscard]] int get_fd() const;
 
 
-    [[nodiscard]] static bool bind_to_en0(asio::ip::udp::socket& socket, const std::string& interface_name, boost::system::error_code& ec);
+    /*
+     * binding the socket to en0 doesn't work. os: "No route to host" (tries to route again instead of directly sending).
+     */
+    // [[nodiscard]] bool bind_to_en0(asio::ip::udp::socket& socket, const std::string& interface_name, boost::system::error_code& ec) const;
+
+
+    [[nodiscard]] bool add_del_route(bool add,
+                                     const asio::ip::address& dest,
+                                     const asio::ip::address& netmaskv4_prefixv6,
+                                     const asio::ip::address& gateway);
 
 private:
-    struct RouteConfig{
-        asio::ip::address dest;
-        asio::ip::address mask;
-        asio::ip::address gateway;
-    };
-
-
     int utun_fd_ = -1;
     std::atomic<bool> running_ = false;
     std::string utun_name_;
+
     quill::Logger* logger_{nullptr};
-    std::vector<RouteConfig> active_routes_;
+
     asio::ip::address_v4 dummy_local_ipv4_;
     asio::ip::address_v4 dummy_gateway_ipv4_;
     asio::ip::address_v6 dummy_local_ipv6_;
     asio::ip::address_v6 dummy_gateway_ipv6_;
+
+    std::mutex route_update_mutex_;                 // locks are fine, route updates happen occasionally (not frequent).
+    std::unordered_set<RouteConfig> active_routes_; // accessed only in start(), stop(), ~Utun() and modify_route(). all use lock.
 
 
     [[nodiscard]] static bool modify_route(bool enable,

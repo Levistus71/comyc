@@ -23,3 +23,24 @@ The severity levels, ordered from lowest to highest:
 * LOG_ERROR: Use when an operation fails and an expected action cannot be completed (e.g., a read/write timeout, an authentication failure, or a failed system call like bind or listen).
 
 * LOG_CRITICAL: Use when the application has encountered a fatal condition and cannot continue operating safely.
+
+
+## RELEASE AND DEBUG BUILDS
+
+## Macros active in the debug build
+In the debug build, CMakeLists.txt sets the macro to QUILL_COMPILE_ACTIVE_LOG_LEVEL_DEBUG. This means every standard logging macro is fully compiled into the binary:
+* LOG_TRACE_L3(...)
+* LOG_TRACE_L2(...)
+* LOG_TRACE_L1(...)
+* LOG_DEBUG(...)
+* LOG_INFO(...)
+* LOG_WARNING(...)
+* LOG_ERROR(...)
+* LOG_CRITICAL(...)
+
+## Macros active in the release build
+macro becomes QUILL_COMPILE_ACTIVE_LOG_LEVEL_INFO. Active macros:
+* LOG_INFO(...)
+* LOG_WARNING(...)
+* LOG_ERROR(...)
+* LOG_CRITICAL(...)

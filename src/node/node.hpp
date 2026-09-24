@@ -61,7 +61,7 @@ public:
     Node(asio::io_context& ioc, NodeRole role);
 
 
-    void start();
+    [[nodiscard]] bool start();
 
 
     void stop();
@@ -91,7 +91,8 @@ private:
     std::shared_ptr<Exit> exit_ = nullptr;
 
     asio::io_context& ioc_;
-    asio::ip::udp::socket udp_socket_;
+    asio::ip::udp::socket udp_socketv4_;
+    asio::ip::udp::socket udp_socketv6_;
 
     asio::ip::udp::endpoint listening_endpoint_;
     std::shared_ptr<asio::ip::udp::endpoint> ignore_endpoint_;
@@ -99,10 +100,11 @@ private:
     quill::Logger* logger_{nullptr};
 
 
-    void listen(const std::shared_ptr<IncomingCell>& packet);
+    void listenv4(const std::shared_ptr<IncomingCell>& packet);
+    void listenv6(const std::shared_ptr<IncomingCell>& packet);
 
 
-    void loop_listen(const std::shared_ptr<IncomingCell>& packet, const boost::system::error_code& ec);
+    void loop_listen(const std::shared_ptr<IncomingCell>& packet, const boost::system::error_code& ec, bool ipv4);
 
 
     void route_packet(const std::shared_ptr<IncomingCell>& packet);

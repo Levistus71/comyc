@@ -14,9 +14,10 @@
 namespace asio = boost::asio;
 
 
-Client::Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socket):
+Client::Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socketv4, asio::ip::udp::socket& udp_socketv6):
     ioc_(ioc),
-    udp_socket_(udp_socket),
+    udp_socketv4_(udp_socketv4),
+    udp_socketv6_(udp_socketv6),
     utun_stream_(ioc_),
     ci_computing_strand_(asio::make_strand(ioc_)){
     logger_ = quill::Frontend::get_logger("client_logger");
@@ -36,11 +37,12 @@ Client::~Client(){
         return false;
     }
 
-    // todo: connect_control_server(), connect_peers() etc;
-
-    boost::system::error_code ec;
-    if(Utun::bind_to_en0(udp_socket_, "en0", ec)){
-        LOG_ERROR(logger_, "udp_socket_ failed to bind to en0: {}", ec.message());
+    // todo: connect_control_server(), connect_peers(), utun_.add_del_route() etc;
+    if(!utun_.add_del_route(true,
+                            asio::ip::make_address("8.8.8.8"),
+                            asio::ip::make_address("255.255.255.255"),
+                            asio::ip::make_address("192.168.0.1"))){
+        LOG_ERROR(logger_, "Failed to add (relay ip) to utun routes.");
         return false;
     }
 
@@ -48,10 +50,11 @@ Client::~Client(){
         LOG_ERROR(logger_, "Failed to start utun.");
         return false;
     }
+    LOG_INFO(logger_, "[UTUN] Started successfully.");
 
     utun_sockfd_ = utun_.get_fd();
 
-    ec.clear();
+    boost::system::error_code ec;
     if(utun_stream_.assign(utun_sockfd_, ec)){
         LOG_ERROR(logger_, "Failed to convert utun_sockfd_ to asio stream_descriptor.");
         return false;
@@ -160,13 +163,16 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
         asio::buffer(raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes)
     };
 
-    udp_socket_.async_send_to(
+    asio::ip::udp::socket& sock = (relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+
+    sock.async_send_to(
         outgoing,
         relay->endpoint,
         // raw_packet and headers in the lambda to make sure it doesn't get destroyed
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
+        // optimize: no shared_ptrs for 1. packet, 2. headers
         [me=shared_from_this(), outgoing_bytes, keep_alive1 = raw_packet, keep_alive2 = headers, keep_alive3 = outgoing, keep_alive4 = relay]
-        (const boost::system::error_code& ec, std::size_t bytes_xfer){
+    (const boost::system::error_code& ec, std::size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "[TUN Worker] Send failed: {}", ec.message());
                 return;
@@ -239,7 +245,6 @@ std::shared_ptr<RelayInfo> Client::choose_relay(const std::shared_ptr<CircuitInf
 }
 
 
-
 void Client::stop(){
     if(bool expected = true; running_.compare_exchange_strong(expected, false) == false){
         LOG_ERROR(logger_, "Called stop() more than once.");
@@ -259,6 +264,7 @@ void Client::process_incoming_packet(std::shared_ptr<IncomingCell> packet){
 
     async_write_to_utun(packet);
 }
+
 
 /*
 incoming packet:
