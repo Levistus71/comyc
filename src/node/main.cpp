@@ -21,7 +21,7 @@ static void setup_loggers(){
         "client_logger",
         std::move(file_sink),
         quill::PatternFormatterOptions{
-            "[%(log_level)] [%(time)] [%(thread_id)] [Client] [%(caller_function)] [%(source_location)] %(message)",
+            "[%(log_level)] [%(time)] [%(thread_id)] [Client] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
@@ -31,7 +31,7 @@ static void setup_loggers(){
         "relay_logger",
         std::move(file_sink),
         quill::PatternFormatterOptions{
-            "[%(log_level)] [%(time)] [%(thread_id)] [Relay] [%(caller_function)] [%(source_location)] %(message)",
+            "[%(log_level)] [%(time)] [%(thread_id)] [Relay] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
@@ -41,7 +41,7 @@ static void setup_loggers(){
         "exit_logger",
         std::move(file_sink),
         quill::PatternFormatterOptions{
-            "[%(log_level)] [%(time)] [%(thread_id)] [Exit] [%(caller_function)] [%(source_location)] %(message)",
+            "[%(log_level)] [%(time)] [%(thread_id)] [Exit] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
@@ -51,7 +51,7 @@ static void setup_loggers(){
         "main_logger",
         std::move(file_sink),
         quill::PatternFormatterOptions{
-            "[%(log_level)] [%(time)] [%(thread_id)] [Main] [%(caller_function)] [%(source_location)] %(message)",
+            "[%(log_level)] [%(time)] [%(thread_id)] [Main] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
@@ -61,7 +61,7 @@ static void setup_loggers(){
         "node_logger",
         std::move(file_sink),
         quill::PatternFormatterOptions{
-            "[%(log_level)] [%(time)] [%(thread_id)] [Node] [%(caller_function)] [%(source_location)] %(message)",
+            "[%(log_level)] [%(time)] [%(thread_id)] [Node] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
@@ -90,11 +90,12 @@ int main(){
 
     // capture signints or sigterms (for clean exit, communicate with relays/exit, kill utun etc)
     asio::signal_set signals(ioc, SIGINT, SIGTERM);
-    signals.async_wait([&](const boost::system::error_code& error, int signal_number){
+    signals.async_wait([&](const boost::system::error_code& error, int /*signal_number*/){
         if(!error){
             LOG_INFO(main_logger, "Sigint/Sigterm. Stopping Initiated.");
             node->stop();
             work_guard.reset();
+            ioc.stop();
         }
     });
 

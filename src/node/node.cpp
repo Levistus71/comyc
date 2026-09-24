@@ -84,12 +84,16 @@ void Node::stop(){
     if(exit_ != nullptr)
         exit_->stop();
 
-    udp_socketv4_.shutdown(asio::ip::udp::socket::shutdown_both);
     boost::system::error_code ec;
     udp_socketv4_.close(ec);
-
     if(ec){
-        LOG_ERROR(logger_, "Error closing udp socket: {}", ec.message());
+        LOG_ERROR(logger_, "Error closing udp socket v4: {}", ec.message());
+    }
+
+    ec.clear();
+    udp_socketv6_.close(ec);
+    if(ec){
+        LOG_ERROR(logger_, "Error closing udp socket v6: {}", ec.message());
     }
 }
 
