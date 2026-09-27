@@ -5,7 +5,6 @@
 #include <random>
 #include <string>
 #include <vector>
-#include <iostream>
 
 #include <boost/asio.hpp>
 
@@ -165,14 +164,15 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
 
     asio::ip::udp::socket& sock = (relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
+    // @formatter:off
     sock.async_send_to(
         outgoing,
         relay->endpoint,
         // raw_packet and headers in the lambda to make sure it doesn't get destroyed
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
         // optimize: no shared_ptrs for 1. packet, 2. headers
-        [me=shared_from_this(), outgoing_bytes, keep_alive1 = raw_packet, keep_alive2 = headers, keep_alive3 = outgoing, keep_alive4 = relay]
-    (const boost::system::error_code& ec, std::size_t bytes_xfer){
+        [me=shared_from_this(), outgoing_bytes, keep_alive1 = raw_packet, keep_alive2 = headers]
+        (const boost::system::error_code& ec, std::size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "[TUN Worker] Send failed: {}", ec.message());
                 return;
@@ -183,6 +183,7 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
             }
         }
     );
+    // @formatter:on
 }
 
 
@@ -260,6 +261,7 @@ void Client::stop(){
 void Client::process_incoming_packet(std::shared_ptr<IncomingCell> packet){
     if(!parse_incoming_packet(packet)){
         LOG_WARNING(logger_, "Dropping faulty packet.");
+        return;
     }
 
     async_write_to_utun(packet);
