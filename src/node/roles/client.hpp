@@ -5,13 +5,12 @@
 #include "src/network/packets/packets.hpp"
 #include "src/node/node_utils.hpp"
 #include "src/node/buffers/reorder_buffer.hpp"
+#include "src/node/buffers/arena_allocator.hpp"
 
 #include <vector>
-#include <shared_mutex>
 
 #include <boost/asio.hpp>
 #include <boost/container_hash/hash.hpp>
-#include <boost/asio/experimental/channel.hpp>
 
 #include <quill/Frontend.h>
 
@@ -71,6 +70,18 @@ struct CircuitInfo{
     std::shared_ptr<std::atomic<sequence_id_t>> sequence_id_ptr;
     std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
     // sh_ce
+    std::shared_ptr<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>> reorder_buffer;
+};
+
+
+struct OngoingCircuitCalcInfo{
+    std::atomic<bool> is_building;
+    ArenaSlotQueue<utun::RawPacket> pending_packets;
+
+
+    explicit OngoingCircuitCalcInfo(const size_t queue_sz):
+        is_building(true),
+        pending_packets(queue_sz){}
 };
 
 
@@ -88,12 +99,6 @@ struct std::hash<NetworkTuple>{
         return seed;
     }
 };
-
-
-// ! experimental features: channel
-using CircuitChannel = asio::experimental::channel<
-    void(boost::system::error_code, std::shared_ptr<CircuitInfo>)
->;
 
 
 class Client : public std::enable_shared_from_this<Client>{
@@ -116,7 +121,7 @@ public:
     void stop();
 
 
-    void process_incoming_packet(std::shared_ptr<IncomingCell> packet);
+    void process_incoming_packet(ArenaSlot<IncomingCell> packet);
 
 private:
     asio::io_context& ioc_;
@@ -125,13 +130,17 @@ private:
 
     std::atomic<bool> running_;
 
+    ArenaAllocator<utun::RawPacket> raw_packet_pool_;
+
     asio::posix::stream_descriptor utun_stream_;
     std::atomic<int> utun_sockfd_ = -1;
     Utun utun_;
 
-    RCU_UMap<NetworkTuple, CircuitInfo> nt_ci_umap_;
+    RCU_UMap<NetworkTuple, std::shared_ptr<CircuitInfo>> nt_ci_umap_;
     asio::strand<asio::io_context::executor_type> ci_computing_strand_;
-    std::unordered_map<NetworkTuple, std::shared_ptr<CircuitChannel>> ci_computing_; // stranded
+    RCU_UMap<NetworkTuple, std::shared_ptr<OngoingCircuitCalcInfo>> ci_computing_;
+
+    RCU_UMap<circuit_id_t, std::shared_ptr<CircuitInfo>> cid_ci_umap_;
 
     quill::Logger* logger_{nullptr};
 
@@ -139,27 +148,35 @@ private:
     inline void start_listening_utun();
 
 
-    void read_packet(const std::shared_ptr<utun::RawPacket>& raw_packet);
+    void read_packet(ArenaSlot<utun::RawPacket> raw_packet);
 
 
-    void loop_utun(const std::shared_ptr<utun::RawPacket>& raw_packet, boost::system::error_code const& ec);
+    void loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::error_code const& ec);
 
 
-    // fixme: no coroutines on hot path.
-    asio::awaitable<void> process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet);
+    void process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet);
 
 
-    asio::awaitable<std::shared_ptr<CircuitInfo>> make_new_circuit(const NetworkTuple& nt);
+    void continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci);
 
 
-    asio::awaitable<std::shared_ptr<CircuitInfo>> make_new_circuit_helper(const NetworkTuple& nt);
+    void make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet);
+
+
+    void handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& curr_state, const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet);
+
+
+    void drain_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& state, std::shared_ptr<CircuitInfo> ci);
 
 
     std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);
 
 
-    [[nodiscard]] bool parse_incoming_packet(std::shared_ptr<IncomingCell> packet);
+    [[nodiscard]] static bool parse_incoming_packet(const ArenaSlot<IncomingCell>& packet);
 
 
-    void async_write_to_utun(std::shared_ptr<IncomingCell> packet);
+    void insert_into_rob(ArenaSlot<IncomingCell> packet);
+
+
+    void write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet);
 };

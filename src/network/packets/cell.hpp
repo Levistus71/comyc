@@ -2,6 +2,8 @@
 #include <type_traits>
 #include <variant>
 #include <array>
+#include <cstdint>
+#include <cstddef>
 
 
 enum class PayloadTier : uint8_t{
@@ -145,5 +147,8 @@ struct IncomingCell{
 
     session_id_t sid = 0;
     circuit_id_t cid = 0;
+
+    uint32_t ip_version_macos = 0;
+
     std::array<uint8_t, CELL_MAX_SZ> payload;
 };

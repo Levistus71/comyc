@@ -2,6 +2,11 @@
 #include "src/network/packets/packets.hpp"
 #include "src/network/sockets/utun.hpp"
 
+#include <ifaddrs.h>
+#include <net/route.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
 #include <random>
 #include <string>
 #include <vector>
@@ -17,6 +22,8 @@ Client::Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socketv4, asio:
     ioc_(ioc),
     udp_socketv4_(udp_socketv4),
     udp_socketv6_(udp_socketv6),
+    running_(false),
+    raw_packet_pool_(16384, "client_logger"),
     utun_stream_(ioc_),
     ci_computing_strand_(asio::make_strand(ioc_)){
     logger_ = quill::Frontend::get_logger("client_logger");
@@ -67,58 +74,42 @@ Client::~Client(){
 
 
 inline void Client::start_listening_utun(){
-    std::shared_ptr<utun::RawPacket> raw_packet = std::make_shared<utun::RawPacket>();
-    read_packet(raw_packet);
+    ArenaSlot<utun::RawPacket> raw_packet = raw_packet_pool_.alloc();
+    read_packet(std::move(raw_packet));
 }
 
 
-void Client::read_packet(const std::shared_ptr<utun::RawPacket>& raw_packet){
+void Client::read_packet(ArenaSlot<utun::RawPacket> raw_packet){
     // TODO: check if this reads whole packet. if it doesn't, how do we make it read the whole packet?
     utun_stream_.async_read_some(
         asio::buffer(raw_packet->payload),
-        [me=shared_from_this(), raw_packet](const boost::system::error_code& ec, std::size_t bytes_xfer){
-            raw_packet->bytes_received = bytes_xfer;
-            me->loop_utun(raw_packet, ec);
+        [me=shared_from_this(), rp = std::move(raw_packet)](const boost::system::error_code& ec, std::size_t bytes_xfer) mutable{
+            rp->bytes_received = bytes_xfer;
+            me->loop_utun(std::move(rp), ec);
         }
     );
 }
 
 
-void Client::loop_utun(const std::shared_ptr<utun::RawPacket>& raw_packet, boost::system::error_code const& ec){
+void Client::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::error_code const& ec){
     if(ec){
         LOG_ERROR(logger_, "Raw packet read failed: {}", ec.message());
         return;
     }
 
-    std::shared_ptr<utun::RawPacket> new_raw_packet = std::make_shared<utun::RawPacket>();
-    read_packet(new_raw_packet);
+    ArenaSlot<utun::RawPacket> new_raw_packet = raw_packet_pool_.alloc();
+    read_packet(std::move(new_raw_packet));
 
-    // process_raw_packet(raw_packet);
-    asio::co_spawn(
-        ioc_,
-        process_raw_packet(raw_packet),
-        asio::detached
-    );
+    process_raw_packet(std::move(raw_packet));
 }
 
 
 // multithread_care
-asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket> raw_packet){
+void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     if(!raw_packet->parse_packet()){
-        LOG_ERROR(logger_, "Dropping faulty packet.");
-        co_return;
+        LOG_ERROR(logger_, "Dropping faulty packet from utun.");
+        return;
     }
-
-    // map: {source_ip, source_port, destination_ip, destination_port} : {circuit_id, sequence_id}
-    // {circuit_id} : {SH_CE, vector<session_id>}
-    // {session_id} : {SH_CR, circuit_id, socket_info}
-
-    /*
-
-    outbound: {source_ip, source_port, destination_ip, destination_port} : {circuit_id, sequence_id, SH_CE, vector<session_id,SH_CR,socket_info,relay_performance>}
-    inbound: {session_id} : {SH_CR, SH_CE, jitter_buffer addr}
-
-    */
 
     NetworkTuple nt{
         .src_addr  = raw_packet->src_addr,
@@ -129,10 +120,16 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
     };
 
     auto ci = nt_ci_umap_.get(nt);
-    if(ci == nullptr){
-        ci = co_await make_new_circuit(nt);
+    if(ci == nullptr) [[unlikely]] {
+        make_new_circuit(nt, std::move(raw_packet));
+        return;
     }
 
+    continue_process_raw_packet(std::move(raw_packet), ci);
+}
+
+
+void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci){
     const auto relay = choose_relay(ci);
 
     const auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN_SZ;
@@ -171,7 +168,7 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
         // raw_packet and headers in the lambda to make sure it doesn't get destroyed
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
         // optimize: no shared_ptrs for 1. packet, 2. headers
-        [me=shared_from_this(), outgoing_bytes, keep_alive1 = raw_packet, keep_alive2 = headers]
+        [me=shared_from_this(), outgoing_bytes, keep_alive1 = std::move(raw_packet), keep_alive2 = headers]
         (const boost::system::error_code& ec, std::size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "[TUN Worker] Send failed: {}", ec.message());
@@ -188,35 +185,34 @@ asio::awaitable<void> Client::process_raw_packet(std::shared_ptr<utun::RawPacket
 
 
 // multithread_care
-asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit(const NetworkTuple& nt){
-    co_return co_await asio::co_spawn(
-        ci_computing_strand_,
-        make_new_circuit_helper(nt),
-        asio::use_awaitable
-    );
-}
-
-
-// stranded
-asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(const NetworkTuple& nt){
-    // NOT PIONEER PACKETS
-    if(const auto it = ci_computing_.find(nt); it != ci_computing_.end()){
-        const auto chan = it->second;
-        co_return co_await chan->async_receive(asio::use_awaitable);
-    }
-    // if already completed when we were competing for the strand
+void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet){
+    // re-check for circuit_info
     {
-        auto t = nt_ci_umap_.get(nt);
-        if(t != nullptr){
-            co_return t;
+        const std::shared_ptr<CircuitInfo> check = nt_ci_umap_.get(nt);
+        if(check != nullptr){
+            return continue_process_raw_packet(std::move(raw_packet), check);
         }
     }
 
-    // PIONEER PACKET
-    ci_computing_[nt] = std::make_shared<CircuitChannel>(ci_computing_strand_.get_inner_executor(), 100);
+    std::shared_ptr<OngoingCircuitCalcInfo> prim_state = ci_computing_.get(nt);
 
-    // TODO: co_await async_compute_ci(nt);
-    auto ci = CircuitInfo{
+    if(prim_state){
+        return handle_non_pioneers(prim_state, nt, std::move(raw_packet));
+    }
+
+    auto pioneer_state = std::make_shared<OngoingCircuitCalcInfo>(1024);
+    auto [non_pioneer_state, pioneer] = ci_computing_.put_if_absent(nt, pioneer_state);
+
+    if(!pioneer){
+        return handle_non_pioneers(non_pioneer_state, nt, std::move(raw_packet));
+    }
+
+    // pioneer packet
+
+    // TODO: async_compute_ci(nt);
+
+    sequence_id_t start_seq = 0; // todo: pioneer packet gets start_seq from new_state, rest all from ci.
+    auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
         .circuit_id      = 1232938,
         .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(23412),
         .relays          = std::vector<std::shared_ptr<RelayInfo>>{
@@ -224,19 +220,50 @@ asio::awaitable<std::shared_ptr<CircuitInfo>> Client::make_new_circuit_helper(co
                 .session_id = 12321344,
                 .endpoint   = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 6000),
             })
-        }
-    };
-    nt_ci_umap_.put(nt, std::move(ci));
-    auto val = nt_ci_umap_.get(nt);
+        },
+        .reorder_buffer = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, start_seq) // fixme: remove 2048
+    });
+    nt_ci_umap_.put(nt, final_ci);
+    cid_ci_umap_.put(1232938, final_ci);
 
-    const auto active_chan = std::move(ci_computing_[nt]);
+    pioneer_state->is_building.store(false, std::memory_order_release); // set building = false AFTER updating nt_ci_umap_
+    drain_non_pioneers(pioneer_state, final_ci);                        // drain non-pioneers. all others also try to drain (building = false);
     ci_computing_.erase(nt);
-    while(active_chan->ready()){
-        active_chan->try_send(boost::system::error_code{}, val);
-    }
-    active_chan->close();
+    continue_process_raw_packet(std::move(raw_packet), final_ci);
+}
 
-    co_return val;
+
+void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& curr_state, const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet){
+    if(!curr_state->pending_packets.try_push(std::move(raw_packet))){
+        LOG_ERROR(logger_, "Failed to push raw_packet into queue while circuit info is being computed.");
+        return;
+    }
+
+    // edge-case: if pioneer finished right as we pushed:
+    if(!curr_state->is_building.load(std::memory_order_acquire)){
+        // get updated circuit info (from nt_ci_umap_, pioneer added this before setting building = false)
+        std::shared_ptr<CircuitInfo> ci = nt_ci_umap_.get(nt);
+        if(ci){
+            // race with poineer thread
+            drain_non_pioneers(curr_state, ci);
+        }
+        else{
+            LOG_ERROR(logger_, "Logic error: non-pioneer packet circuit info calc: building finished, but didn't"
+                      "find ci in nt_ci_umap_.");
+        }
+    }
+}
+
+
+void Client::drain_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& state, std::shared_ptr<CircuitInfo> ci){
+    while(auto popped_pkt = state->pending_packets.try_pop()){
+        asio::post(
+            ioc_,
+            [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), ci]() mutable{
+                me->continue_process_raw_packet(std::move(temp_pkt), ci);
+            }
+        );
+    }
 }
 
 
@@ -258,13 +285,18 @@ void Client::stop(){
 }
 
 
-void Client::process_incoming_packet(std::shared_ptr<IncomingCell> packet){
+void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
+    if(!packet){
+        LOG_WARNING(logger_, "Recieved empty packet.");
+        return;
+    }
+
     if(!parse_incoming_packet(packet)){
         LOG_WARNING(logger_, "Dropping faulty packet.");
         return;
     }
 
-    async_write_to_utun(packet);
+    insert_into_rob(std::move(packet));
 }
 
 
@@ -274,7 +306,7 @@ incoming packet:
     session_id
     {thdr, phdr, payload}
 */
-[[nodiscard]] bool Client::parse_incoming_packet(std::shared_ptr<IncomingCell> packet){
+[[nodiscard]] bool Client::parse_incoming_packet(const ArenaSlot<IncomingCell>& packet){
     if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t)){
         return false;
     }
@@ -302,12 +334,49 @@ incoming packet:
         packet->cid |= (byte << shift);
     }
 
-    // todo: actual packet parsing, start_offset etc.
+    // todo: actual ip version, packet parsing, start_offset etc.
+    packet->ip_version_macos = htonl(AF_INET);
+
     return true;
 }
 
 
-void Client::async_write_to_utun(std::shared_ptr<IncomingCell> packet){
+void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
     // todo: complete this
-    return;
+    auto circuit_info = cid_ci_umap_.get(packet->cid);
+    if(!circuit_info){
+        LOG_WARNING(logger_, "Recieved incoming packet with unknown cid: {}", packet->cid);
+        return;
+    }
+
+    const auto reorder_buffer = circuit_info->reorder_buffer;
+    if(!reorder_buffer->insert_try_drain(
+            packet->sid,
+            std::move(packet),
+            [me=shared_from_this()](sequence_id_t seq_id, ArenaSlot<IncomingCell> pkt){
+                me->write_to_utun(seq_id, std::move(pkt));
+            }
+        )
+    ){
+        LOG_ERROR(logger_, "Reorder buffer insert failed. Redo this log message with clearer error.");
+    }
+}
+
+
+void Client::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet){
+    if(!packet || packet->payload_bytes == 0){
+        return;
+    }
+
+    // todo: this properly
+    asio::async_write(
+        utun_stream_,
+        asio::buffer(packet->payload.data(), packet->payload_bytes),
+        [me = shared_from_this(), pkt = std::move(packet), seq_id]
+        (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
+            if(ec){
+                LOG_ERROR(me->logger_, "Failed to write seq_id {} to utun: {}", seq_id, ec.message());
+            }
+        }
+    );
 }

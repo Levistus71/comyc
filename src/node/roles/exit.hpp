@@ -1,5 +1,6 @@
 #pragma once
 #include <src/network/packets/cell.hpp>
+#include <src/node/buffers/arena_allocator.hpp>
 
 
 /*
@@ -30,7 +31,7 @@ public:
     void stop();
 
 
-    void process_incoming_packet(std::shared_ptr<IncomingCell> packet);
+    void process_incoming_packet(ArenaSlot<IncomingCell> packet);
 
 private:
 };

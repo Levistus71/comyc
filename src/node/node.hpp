@@ -97,17 +97,19 @@ private:
     asio::ip::udp::endpoint listening_endpoint_;
     std::shared_ptr<asio::ip::udp::endpoint> ignore_endpoint_;
 
+    ArenaAllocator<IncomingCell> incoming_cell_pool_;
+
     quill::Logger* logger_{nullptr};
 
 
-    void listenv4(const std::shared_ptr<IncomingCell>& packet);
+    void listenv4(ArenaSlot<IncomingCell> packet);
 
 
-    void listenv6(const std::shared_ptr<IncomingCell>& packet);
+    void listenv6(ArenaSlot<IncomingCell> packet);
 
 
-    void loop_listen(const std::shared_ptr<IncomingCell>& packet, const boost::system::error_code& ec, bool ipv4);
+    void loop_listen(ArenaSlot<IncomingCell> packet, const boost::system::error_code& ec, bool ipv4);
 
 
-    void route_packet(const std::shared_ptr<IncomingCell>& packet);
+    void route_packet(ArenaSlot<IncomingCell> packet) const;
 };

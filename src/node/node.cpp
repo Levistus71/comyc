@@ -9,7 +9,8 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
     ioc_(ioc),
     udp_socketv4_(ioc_),
     udp_socketv6_(ioc_),
-    listening_endpoint_(asio::ip::udp::endpoint(asio::ip::udp::v4(), 12345)){
+    listening_endpoint_(asio::ip::udp::endpoint(asio::ip::udp::v4(), 12345)),
+    incoming_cell_pool_(16834, "node_logger"){
     logger_ = quill::Frontend::get_logger("node_logger");
 
     // todo: start client, start relay, start exit? based on the role.
@@ -60,10 +61,10 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
     if(exit_ != nullptr)
         exit_->start();
 
-    const auto first_packetv4 = std::make_shared<IncomingCell>();
-    listenv4(first_packetv4);
-    const auto first_packetv6 = std::make_shared<IncomingCell>();
-    listenv6(first_packetv6);
+    auto first_packetv4 = incoming_cell_pool_.alloc();
+    listenv4(std::move(first_packetv4));
+    auto first_packetv6 = incoming_cell_pool_.alloc();
+    listenv6(std::move(first_packetv6));
 
     return true;
 }
@@ -98,47 +99,47 @@ void Node::stop(){
 }
 
 
-void Node::listenv4(const std::shared_ptr<IncomingCell>& packet){
+void Node::listenv4(ArenaSlot<IncomingCell> packet){
     udp_socketv4_.async_receive_from(
         asio::buffer(packet->payload),
         (*ignore_endpoint_),
-        [me=shared_from_this(), packet](const boost::system::error_code& ec, const size_t bytes_received){
-            packet->bytes_received = bytes_received;
-            me->loop_listen(packet, ec, true);
+        [me=shared_from_this(), pkt = std::move(packet)](const boost::system::error_code& ec, const size_t bytes_received) mutable {
+            pkt->bytes_received = bytes_received;
+            me->loop_listen(std::move(pkt), ec, true);
         }
     );
 }
 
 
-void Node::listenv6(const std::shared_ptr<IncomingCell>& packet){
+void Node::listenv6(ArenaSlot<IncomingCell> packet){
     udp_socketv6_.async_receive_from(
         asio::buffer(packet->payload),
         (*ignore_endpoint_),
-        [me=shared_from_this(), packet](const boost::system::error_code& ec, const size_t bytes_received){
-            packet->bytes_received = bytes_received;
-            me->loop_listen(packet, ec, false);
+        [me=shared_from_this(), pkt = std::move(packet)](const boost::system::error_code& ec, const size_t bytes_received) mutable{
+            pkt->bytes_received = bytes_received;
+            me->loop_listen(std::move(pkt), ec, false);
         }
     );
 }
 
 
-void Node::loop_listen(const std::shared_ptr<IncomingCell>& packet, const boost::system::error_code& ec, bool ipv4){
+void Node::loop_listen(ArenaSlot<IncomingCell> packet, const boost::system::error_code& ec, bool ipv4){
     if(ec){
         LOG_ERROR(logger_, "Packet receive failed in loop_listen(): {}", ec.message());
         return;
     }
 
-    std::shared_ptr<IncomingCell> new_packet = std::make_shared<IncomingCell>();
+    ArenaSlot<IncomingCell> new_packet = incoming_cell_pool_.alloc();
     if(ipv4)
-        listenv4(new_packet);
+        listenv4(std::move(new_packet));
     else
-        listenv6(new_packet);
+        listenv6(std::move(new_packet));
 
-    route_packet(packet);
+    route_packet(std::move(packet));
 }
 
 
-void Node::route_packet(const std::shared_ptr<IncomingCell>& packet){
+void Node::route_packet(ArenaSlot<IncomingCell> packet) const{
     if(packet->bytes_received < sizeof(RoutingFlag)){
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<1.");
         return;
@@ -149,7 +150,7 @@ void Node::route_packet(const std::shared_ptr<IncomingCell>& packet){
         case RoutingFlag::CLIENT_TO_RELAY: {
             asio::co_spawn(
                 ioc_,
-                relay_->forward_to_exit(packet),
+                relay_->forward_to_exit(std::move(packet)),
                 asio::detached
             );
             return;
@@ -157,17 +158,17 @@ void Node::route_packet(const std::shared_ptr<IncomingCell>& packet){
         case RoutingFlag::EXIT_TO_RELAY: {
             asio::co_spawn(
                 ioc_,
-                relay_->forward_to_client(packet),
+                relay_->forward_to_client(std::move(packet)),
                 asio::detached
             );
             return;
         }
         case RoutingFlag::RELAY_TO_CLIENT: {
-            client_->process_incoming_packet(packet);
+            client_->process_incoming_packet(std::move(packet));
             return;
         }
         case RoutingFlag::RELAY_TO_EXIT: {
-            exit_->process_incoming_packet(packet);
+            exit_->process_incoming_packet(std::move(packet));
             return;
         }
         default: {

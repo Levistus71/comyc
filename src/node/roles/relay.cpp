@@ -34,7 +34,7 @@ outgoing packet:
     route_flag
     {thdr, phdr, payload}
 */
-[[nodiscard]] static bool parse_packet_from_client(std::shared_ptr<IncomingCell> packet){
+[[nodiscard]] static bool parse_packet_from_client(const ArenaSlot<IncomingCell>& packet){
     if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t)){
         return false;
     }
@@ -53,7 +53,7 @@ outgoing packet:
 }
 
 
-asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packet){
+asio::awaitable<void> Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
     if(!parse_packet_from_client(packet)){
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, size<5.");
         co_return;
@@ -88,7 +88,7 @@ asio::awaitable<void> Relay::forward_to_exit(std::shared_ptr<IncomingCell> packe
         exit_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [me=shared_from_this(), keep_alive = packet](const boost::system::error_code& ec, size_t bytes_xfer){
+        [me=shared_from_this(), keep_alive = std::move(packet)](const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "[Relay] Exit send failed: {}", ec.message());
                 return;
@@ -110,7 +110,7 @@ outgoing packet:
     session_id
     {thdr, phdr, payload}
 */
-[[nodiscard]] static bool parse_packet_from_exit(std::shared_ptr<IncomingCell> packet){
+[[nodiscard]] static bool parse_packet_from_exit(const ArenaSlot<IncomingCell>& packet){
     if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(circuit_id_t)){
         return false;
     }
@@ -132,7 +132,7 @@ outgoing packet:
 }
 
 
-asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> packet){
+asio::awaitable<void> Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
     if(!parse_packet_from_exit(packet)){
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<5.");
         co_return;
@@ -169,7 +169,7 @@ asio::awaitable<void> Relay::forward_to_client(std::shared_ptr<IncomingCell> pac
         client_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
-        [me=shared_from_this(), keep_alive = packet]
+        [me=shared_from_this(), keep_alive = std::move(packet)]
     (const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "Exit send failed: {}", ec.message());

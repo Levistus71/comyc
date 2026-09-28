@@ -2,10 +2,12 @@
 
 #include "src/node/node_utils.hpp"
 #include "src/network/packets/cell.hpp"
+#include "src/node/buffers/arena_allocator.hpp"
 
 #include <boost/asio.hpp>
 
 #include <quill/Logger.h>
+
 
 
 namespace asio = boost::asio;
@@ -38,10 +40,10 @@ public:
     void stop();
 
 
-    asio::awaitable<void> forward_to_exit(std::shared_ptr<IncomingCell> packet);
+    asio::awaitable<void> forward_to_exit(ArenaSlot<IncomingCell> packet);
 
 
-    asio::awaitable<void> forward_to_client(std::shared_ptr<IncomingCell> packet);
+    asio::awaitable<void> forward_to_client(ArenaSlot<IncomingCell> packet);
 
 private:
     asio::io_context& ioc_;
