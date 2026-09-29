@@ -157,7 +157,7 @@ private:
     void process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet);
 
 
-    void continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci);
+    void continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci, sequence_id_t seq_id);
 
 
     void make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet);

@@ -97,14 +97,17 @@ void Client::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::err
         return;
     }
 
+    // process_raw_packet should come before read_packet to avoid race conditions on seq_id incrementing
+    // thread 1: packet1.seq_id = 2
+    // thread 2: packet2.seq_id = 1 -> faster because of os scheduling/uncontrolable shit
+    process_raw_packet(std::move(raw_packet));
+
     ArenaSlot<utun::RawPacket> new_raw_packet = raw_packet_pool_.alloc();
     read_packet(std::move(new_raw_packet));
-
-    process_raw_packet(std::move(raw_packet));
 }
 
 
-// multithread_care
+// single_threaded: parse packet, query circuit info, increment seq_id, post continue_process_packet and return
 void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     if(!raw_packet->parse_packet()){
         LOG_ERROR(logger_, "Dropping faulty packet from utun.");
@@ -121,15 +124,24 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
 
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr) [[unlikely]] {
-        make_new_circuit(nt, std::move(raw_packet));
+        asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), nt_cpy = nt]() mutable {
+            me->make_new_circuit(nt_cpy, std::move(rp));
+        });
+        // make_new_circuit(nt, std::move(raw_packet));
         return;
     }
 
-    continue_process_raw_packet(std::move(raw_packet), ci);
+    // update seq_id before returning to read_packet.
+    const sequence_id_t seq_id = (*ci->sequence_id_ptr)++;
+
+    // continue_process_raw_packet(std::move(raw_packet), ci);
+    asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), ci, seq_id]() mutable {
+        me->continue_process_raw_packet(std::move(rp), ci, seq_id);
+    });
 }
 
 
-void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci){
+void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci, sequence_id_t seq_id){
     const auto relay = choose_relay(ci);
 
     const auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN_SZ;
@@ -143,7 +155,7 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
             .payload_tier = PayloadTier::TIER_1024
         },
         .phdr{
-            .sequence_id = (*ci->sequence_id_ptr)++,
+            .sequence_id = seq_id,
             .ip_protocol = 0,
             .packet_id   = 0,
             .payload_len = static_cast<uint16_t>(app_internal_bytes),
@@ -166,7 +178,7 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
         outgoing,
         relay->endpoint,
         // raw_packet and headers in the lambda to make sure it doesn't get destroyed
-        // ? compiler shouldn't theoretically optimize this packet out of the capture list.
+        // NOTE: compiler shouldn't theoretically optimize this packet out of the capture list.
         // optimize: no shared_ptrs for 1. packet, 2. headers
         [me=shared_from_this(), outgoing_bytes, keep_alive1 = std::move(raw_packet), keep_alive2 = headers]
         (const boost::system::error_code& ec, std::size_t bytes_xfer){
@@ -190,7 +202,7 @@ void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket>
     {
         const std::shared_ptr<CircuitInfo> check = nt_ci_umap_.get(nt);
         if(check != nullptr){
-            return continue_process_raw_packet(std::move(raw_packet), check);
+            return continue_process_raw_packet(std::move(raw_packet), check, (*check->sequence_id_ptr)++);
         }
     }
 
@@ -229,7 +241,7 @@ void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket>
     pioneer_state->is_building.store(false, std::memory_order_release); // set building = false AFTER updating nt_ci_umap_
     drain_non_pioneers(pioneer_state, final_ci);                        // drain non-pioneers. all others also try to drain (building = false);
     ci_computing_.erase(nt);
-    continue_process_raw_packet(std::move(raw_packet), final_ci);
+    continue_process_raw_packet(std::move(raw_packet), final_ci, start_seq);
 }
 
 
@@ -260,7 +272,7 @@ void Client::drain_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& s
         asio::post(
             ioc_,
             [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), ci]() mutable{
-                me->continue_process_raw_packet(std::move(temp_pkt), ci);
+                me->continue_process_raw_packet(std::move(temp_pkt), ci, (*ci->sequence_id_ptr)++);
             }
         );
     }
@@ -316,7 +328,7 @@ incoming packet:
     for(size_t i = 0; i < loops; i++){
         uint8_t byte = static_cast<session_id_t>(packet->payload[i + sizeof(RoutingFlag)]);
         size_t shift = 8 * (loops - i - 1);
-        packet->cid |= (byte << shift);
+        packet->sid |= (byte << shift);
     }
 
     // todo: decrypt_using_sh_cr()
