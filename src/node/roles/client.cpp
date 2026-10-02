@@ -25,7 +25,7 @@ Client::Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socketv4, asio:
     running_(false),
     raw_packet_pool_(16384, "client_logger"),
     utun_stream_(ioc_),
-    ci_computing_strand_(asio::make_strand(ioc_)){
+    utun_("client_logger"){
     logger_ = quill::Frontend::get_logger("client_logger");
 }
 
@@ -52,7 +52,7 @@ Client::~Client(){
         return false;
     }
 
-    if(!utun_.start()){
+    if(!utun_.start(true)){
         LOG_ERROR(logger_, "Failed to start utun.");
         return false;
     }
@@ -75,11 +75,11 @@ Client::~Client(){
 
 inline void Client::start_listening_utun(){
     ArenaSlot<utun::RawPacket> raw_packet = raw_packet_pool_.alloc();
-    read_packet(std::move(raw_packet));
+    read_packet_utun(std::move(raw_packet));
 }
 
 
-void Client::read_packet(ArenaSlot<utun::RawPacket> raw_packet){
+void Client::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
     // TODO: check if this reads whole packet. if it doesn't, how do we make it read the whole packet?
     utun_stream_.async_read_some(
         asio::buffer(raw_packet->payload),
@@ -103,7 +103,7 @@ void Client::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::err
     process_raw_packet(std::move(raw_packet));
 
     ArenaSlot<utun::RawPacket> new_raw_packet = raw_packet_pool_.alloc();
-    read_packet(std::move(new_raw_packet));
+    read_packet_utun(std::move(new_raw_packet));
 }
 
 
@@ -124,7 +124,7 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
 
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr) [[unlikely]] {
-        asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), nt_cpy = nt]() mutable {
+        asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), nt_cpy = nt]() mutable{
             me->make_new_circuit(nt_cpy, std::move(rp));
         });
         // make_new_circuit(nt, std::move(raw_packet));
@@ -135,9 +135,11 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     const sequence_id_t seq_id = (*ci->sequence_id_ptr)++;
 
     // continue_process_raw_packet(std::move(raw_packet), ci);
-    asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), ci, seq_id]() mutable {
+    asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), ci, seq_id]() mutable{
         me->continue_process_raw_packet(std::move(rp), ci, seq_id);
     });
+
+    // returns to loop_utun.
 }
 
 
@@ -236,7 +238,7 @@ void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket>
         .reorder_buffer = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, start_seq) // fixme: remove 2048
     });
     nt_ci_umap_.put(nt, final_ci);
-    cid_ci_umap_.put(1232938, final_ci);
+    sid_ci_umap_.put(12321344, final_ci);
 
     pioneer_state->is_building.store(false, std::memory_order_release); // set building = false AFTER updating nt_ci_umap_
     drain_non_pioneers(pioneer_state, final_ci);                        // drain non-pioneers. all others also try to drain (building = false);
@@ -355,7 +357,7 @@ incoming packet:
 
 void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
     // todo: complete this
-    auto circuit_info = cid_ci_umap_.get(packet->cid);
+    auto circuit_info = sid_ci_umap_.get(packet->sid);
     if(!circuit_info){
         LOG_WARNING(logger_, "Recieved incoming packet with unknown cid: {}", packet->cid);
         return;
@@ -385,7 +387,7 @@ void Client::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet)
         utun_stream_,
         asio::buffer(packet->payload.data(), packet->payload_bytes),
         [me = shared_from_this(), pkt = std::move(packet), seq_id]
-        (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
+    (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
             if(ec){
                 LOG_ERROR(me->logger_, "Failed to write seq_id {} to utun: {}", seq_id, ec.message());
             }

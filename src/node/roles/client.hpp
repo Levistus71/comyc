@@ -10,7 +10,6 @@
 #include <vector>
 
 #include <boost/asio.hpp>
-#include <boost/container_hash/hash.hpp>
 
 #include <quill/Frontend.h>
 
@@ -40,39 +39,6 @@ what should we communicate with the control_server:
 
 */
 
-struct NetworkTuple{
-    asio::ip::address src_addr;
-    asio::ip::address dest_addr;
-
-    uint16_t src_port;
-    uint16_t dest_port;
-
-
-    bool operator==(const NetworkTuple& other) const{
-        return (src_addr == other.src_addr) &&
-               (dest_addr == other.dest_addr) &&
-               (src_port == other.src_port) &&
-               (dest_port == other.dest_port);
-    }
-};
-
-
-struct RelayInfo{
-    session_id_t session_id;
-    asio::ip::udp::endpoint endpoint;
-    // relay performance
-    // sh_cr
-};
-
-
-struct CircuitInfo{
-    circuit_id_t circuit_id;
-    std::shared_ptr<std::atomic<sequence_id_t>> sequence_id_ptr;
-    std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
-    // sh_ce
-    std::shared_ptr<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>> reorder_buffer;
-};
-
 
 struct OngoingCircuitCalcInfo{
     std::atomic<bool> is_building;
@@ -82,22 +48,6 @@ struct OngoingCircuitCalcInfo{
     explicit OngoingCircuitCalcInfo(const size_t queue_sz):
         is_building(true),
         pending_packets(queue_sz){}
-};
-
-
-template<>
-struct std::hash<NetworkTuple>{
-    std::size_t operator()(const NetworkTuple& tuple) const noexcept{
-        std::size_t seed = 0;
-
-        boost::hash_combine(seed, std::hash<std::string>{}(tuple.src_addr.to_string()));
-        boost::hash_combine(seed, std::hash<std::string>{}(tuple.dest_addr.to_string()));
-
-        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.src_port));
-        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.dest_port));
-
-        return seed;
-    }
 };
 
 
@@ -136,11 +86,12 @@ private:
     std::atomic<int> utun_sockfd_ = -1;
     Utun utun_;
 
+    // outgoing
     RCU_UMap<NetworkTuple, std::shared_ptr<CircuitInfo>> nt_ci_umap_;
-    asio::strand<asio::io_context::executor_type> ci_computing_strand_;
     RCU_UMap<NetworkTuple, std::shared_ptr<OngoingCircuitCalcInfo>> ci_computing_;
 
-    RCU_UMap<circuit_id_t, std::shared_ptr<CircuitInfo>> cid_ci_umap_;
+    // incoming
+    RCU_UMap<sequence_id_t, std::shared_ptr<CircuitInfo>> sid_ci_umap_;
 
     quill::Logger* logger_{nullptr};
 
@@ -148,7 +99,7 @@ private:
     inline void start_listening_utun();
 
 
-    void read_packet(ArenaSlot<utun::RawPacket> raw_packet);
+    void read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet);
 
 
     void loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::error_code const& ec);

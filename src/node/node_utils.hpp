@@ -5,6 +5,11 @@
 #include <mutex>
 #include <type_traits>
 
+#include <src/node/buffers/arena_allocator.hpp>
+#include <src/node/buffers/reorder_buffer.hpp>
+
+#include <boost/container_hash/hash.hpp>
+
 #if !defined(__cpp_lib_atomic_shared_ptr) || __cpp_lib_atomic_shared_ptr < 201711L
 #error "C++ library toolchain doesn't support std::atomic<std::shared_ptr>"
 #endif
@@ -121,7 +126,7 @@ std::pair<typename RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::return_type, b
     if(auto local_umap = umap_.load(std::memory_order_consume)){
         auto it = local_umap->find(k);
         if(it != local_umap->end()){
-            if constexpr (SharedPtr<Val>){
+            if constexpr(SharedPtr<Val>){
                 return {it->second, false};
             }
             else{
@@ -136,7 +141,7 @@ std::pair<typename RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::return_type, b
     if(current){
         auto it = current->find(k);
         if(it != current->end()){
-            if constexpr (SharedPtr<Val>){
+            if constexpr(SharedPtr<Val>){
                 return {it->second, false};
             }
             else{
@@ -150,7 +155,7 @@ std::pair<typename RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::return_type, b
 
     umap_.store(new_map, std::memory_order_release);
 
-    if constexpr (SharedPtr<Val>){
+    if constexpr(SharedPtr<Val>){
         return {it->second, true};
     }
     else{
@@ -164,7 +169,7 @@ std::pair<typename RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::return_type, b
     if(auto local_umap = umap_.load(std::memory_order_consume)){
         auto it = local_umap->find(k);
         if(it != local_umap->end()){
-            if constexpr (SharedPtr<Val>){
+            if constexpr(SharedPtr<Val>){
                 return {it->second, false};
             }
             else{
@@ -179,7 +184,7 @@ std::pair<typename RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::return_type, b
     if(current){
         auto it = current->find(k);
         if(it != current->end()){
-            if constexpr (SharedPtr<Val>){
+            if constexpr(SharedPtr<Val>){
                 return {it->second, false};
             }
             else{
@@ -215,3 +220,53 @@ void RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::erase(const Key& key){
     new_map->erase(key);
     umap_.store(new_map, std::memory_order_release);
 }
+
+
+struct NetworkTuple{
+    asio::ip::address src_addr;
+    asio::ip::address dest_addr;
+
+    uint16_t src_port;
+    uint16_t dest_port;
+
+
+    bool operator==(const NetworkTuple& other) const{
+        return (src_addr == other.src_addr) &&
+               (dest_addr == other.dest_addr) &&
+               (src_port == other.src_port) &&
+               (dest_port == other.dest_port);
+    }
+};
+
+
+template<>
+struct std::hash<NetworkTuple>{
+    std::size_t operator()(const NetworkTuple& tuple) const noexcept{
+        std::size_t seed = 0;
+
+        boost::hash_combine(seed, std::hash<std::string>{}(tuple.src_addr.to_string()));
+        boost::hash_combine(seed, std::hash<std::string>{}(tuple.dest_addr.to_string()));
+
+        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.src_port));
+        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.dest_port));
+
+        return seed;
+    }
+};
+
+
+struct RelayInfo{
+    session_id_t session_id;
+    asio::ip::udp::endpoint endpoint;
+    // relay performance
+    // sh_cr
+};
+
+
+struct CircuitInfo{
+    circuit_id_t circuit_id;
+    std::shared_ptr<std::atomic<sequence_id_t>> sequence_id_ptr;
+    std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
+    // sh_ce
+    std::shared_ptr<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>> reorder_buffer;
+};

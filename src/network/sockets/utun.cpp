@@ -19,11 +19,11 @@
 #include <quill/LogMacros.h>
 
 
-Utun::Utun(){
-    logger_ = quill::Frontend::get_logger("client_logger");
-    dummy_local_ipv4_ = asio::ip::make_address_v4("10.8.0.2");
+Utun::Utun(const std::string& logger_name){
+    logger_ = quill::Frontend::get_logger(logger_name);
+    vpn_assigned_ipv4_ = asio::ip::make_address_v4("10.8.0.2");
     dummy_gateway_ipv4_ = asio::ip::make_address_v4("10.8.0.1");
-    dummy_local_ipv6_ = asio::ip::make_address_v6("fd00::2");
+    vpn_assigned_ipv6_ = asio::ip::make_address_v6("fd00::2");
     dummy_gateway_ipv6_ = asio::ip::make_address_v6("fd00::1");
 }
 
@@ -80,7 +80,7 @@ void Utun::stop(){
 }
 
 
-[[nodiscard]] bool Utun::start(){
+[[nodiscard]] bool Utun::start(const bool hijack_system_traffic){
     /*
         val.compare_exchange_strong(&expected, desired)
         if(val==expected){
@@ -112,7 +112,7 @@ void Utun::stop(){
         return false;
     }
 
-    if(!toggle_hijack_on()){
+    if(hijack_system_traffic && !toggle_hijack_on()){
         LOG_ERROR(logger_, "[UTUN] toggle_hijack_on() failed.");
         stop();
         return false;
@@ -186,13 +186,13 @@ int Utun::get_fd() const{
     LOG_INFO(logger_, "[UTUN] Trying to hijack system traffic.");
 
 
-    if(!configure_utun_v4(dummy_local_ipv4_, dummy_gateway_ipv4_)){
+    if(!configure_utun_v4(vpn_assigned_ipv4_, dummy_gateway_ipv4_)){
         LOG_ERROR(logger_, "[UTUN] Failed to configure interface IPs. ioctl fail?");
         ::close(utun_fd_);
         return false;
     }
 
-    if(!configure_utun_v6(dummy_local_ipv6_, dummy_gateway_ipv6_)){
+    if(!configure_utun_v6(vpn_assigned_ipv6_, dummy_gateway_ipv6_)){
         LOG_ERROR(logger_, "[UTUN] Failed to configure interface IPs. ioctl fail?");
         ::close(utun_fd_);
         return false;

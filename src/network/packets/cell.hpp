@@ -134,6 +134,13 @@ struct ClientFullHeaders{
 };
 
 
+struct ExitFullHeaders{
+    RoutingFlag route_flag;
+    TransitHeader thdr;
+    PayloadHeader phdr;
+};
+
+
 constexpr size_t CELL_MAX_SZ = 2000;
 
 

@@ -8,6 +8,20 @@
 
 #include <boost/asio.hpp>
 
+/*
+ * Client:
+ *      1. The browser opens a socket to Google
+ *      2. The OS kernel looks up the route for Google's IP,
+ *          matches the hijack rule pointing to dummy_gateway_ip, and determines the egress interface is utun
+ *      3. The kernel checks the utun interface for its assigned address and stamps vpn_assigned_ip
+ *          as the Source IP on the packet header. All the ip packets on in the file descriptor have vpn_assigned_ip on it.
+ *      4. We read it from the utun and send client_ip + (vpn_assigned_ip payload) to relays
+ *      ... exit processing
+ *      5. we get back packet with google's ip and vpn_assigned_ip back
+ *      6. hand this packet to os, hands packet back to browser.
+ */
+
+
 namespace asio = boost::asio;
 
 
@@ -45,7 +59,7 @@ struct hash<RouteConfig>{
 
 class Utun{
 public:
-    Utun();
+    Utun(const std::string& logger_name);
 
 
     ~Utun();
@@ -57,7 +71,7 @@ public:
     Utun& operator=(const Utun&) = delete;
 
 
-    [[nodiscard]] bool start();
+    [[nodiscard]] bool start(bool hijack_system_traffic);
 
 
     void stop();
@@ -84,9 +98,9 @@ private:
 
     quill::Logger* logger_{nullptr};
 
-    asio::ip::address_v4 dummy_local_ipv4_;
+    asio::ip::address_v4 vpn_assigned_ipv4_;
     asio::ip::address_v4 dummy_gateway_ipv4_;
-    asio::ip::address_v6 dummy_local_ipv6_;
+    asio::ip::address_v6 vpn_assigned_ipv6_;
     asio::ip::address_v6 dummy_gateway_ipv6_;
 
     std::mutex route_update_mutex_;                 // locks are fine, route updates happen occasionally (not frequent).

@@ -25,7 +25,7 @@ namespace utun{
     else if(family_hdr == AF_INET6)
         ip_hdr_sz = sizeof(struct ip6_hdr);
     else{
-        std::cerr << "[Tun Worker] Unknown family header: " << family_hdr << std::endl;
+        // std::cerr << "[Tun Worker] Unknown family header: " << family_hdr << std::endl;
         return false;
     }
 
