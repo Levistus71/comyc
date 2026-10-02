@@ -155,6 +155,8 @@ struct IncomingCell{
     session_id_t sid = 0;
     circuit_id_t cid = 0;
 
+    sequence_id_t seq_id = 0;
+
     uint32_t ip_version_macos = 0;
 
     std::array<uint8_t, CELL_MAX_SZ> payload;

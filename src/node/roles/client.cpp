@@ -365,7 +365,7 @@ void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
 
     const auto reorder_buffer = circuit_info->reorder_buffer;
     if(!reorder_buffer->insert_try_drain(
-            packet->sid,
+            packet->seq_id,
             std::move(packet),
             [me=shared_from_this()](sequence_id_t seq_id, ArenaSlot<IncomingCell> pkt){
                 me->write_to_utun(seq_id, std::move(pkt));
