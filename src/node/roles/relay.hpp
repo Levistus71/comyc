@@ -40,10 +40,10 @@ public:
     void stop();
 
 
-    asio::awaitable<void> forward_to_exit(ArenaSlot<IncomingCell> packet);
+    void forward_to_exit(ArenaSlot<IncomingCell> packet);
 
 
-    asio::awaitable<void> forward_to_client(ArenaSlot<IncomingCell> packet);
+    void forward_to_client(ArenaSlot<IncomingCell> packet);
 
 private:
     asio::io_context& ioc_;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <queue>
 #include <vector>
 
 #include <boost/lockfree/queue.hpp>
@@ -209,9 +210,9 @@ void ArenaAllocator<T>::dealloc(T* item_ptr) noexcept{
 
 
 template<typename T>
-class ArenaSlotQueue{
+class ArenaSlotMPMCLockfreeQueue{
 public:
-    explicit ArenaSlotQueue(size_t capacity):
+    explicit ArenaSlotMPMCLockfreeQueue(size_t capacity):
         queue_(capacity){}
 
 
@@ -246,4 +247,50 @@ private:
 
 
     boost::lockfree::queue<QueueItem, boost::lockfree::fixed_sized<true>> queue_;
+};
+
+
+template<typename T>
+class ArenaSlotQueue{
+public:
+    explicit ArenaSlotQueue(size_t capacity):
+        capacity_(capacity){}
+
+
+    bool try_push(ArenaSlot<T> slot){
+        if(!slot)
+            return false;
+
+        QueueItem item{slot.get(), slot.get_allocator()};
+
+        if(queue_.size() >= capacity_){
+            return false;
+        }
+
+        queue_.push(item);
+        slot.release();
+        return true;
+    }
+
+
+    std::optional<ArenaSlot<T>> try_pop(){
+        if(queue_.empty()){
+            return std::nullopt;
+        }
+
+        QueueItem item = queue_.front();
+        queue_.pop();
+        return ArenaSlot<T>(item.ptr, item.allocator);
+    }
+
+
+private:
+    struct QueueItem{
+        T* ptr{nullptr};
+        ArenaAllocator<T>* allocator{nullptr};
+    };
+
+
+    size_t capacity_;
+    std::queue<QueueItem> queue_;
 };

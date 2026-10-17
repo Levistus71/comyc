@@ -148,27 +148,39 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet) const{
 
     switch(packet->route_flag){
         case RoutingFlag::CLIENT_TO_RELAY: {
-            asio::co_spawn(
+            asio::post(
                 ioc_,
-                relay_->forward_to_exit(std::move(packet)),
-                asio::detached
+                [me = shared_from_this(), pkt = std::move(packet)]() mutable{
+                    me->relay_->forward_to_exit(std::move(pkt));
+                }
             );
             return;
         }
         case RoutingFlag::EXIT_TO_RELAY: {
-            asio::co_spawn(
+            asio::post(
                 ioc_,
-                relay_->forward_to_client(std::move(packet)),
-                asio::detached
+                [me = shared_from_this(), pkt = std::move(packet)]() mutable{
+                    me->relay_->forward_to_client(std::move(pkt));
+                }
             );
             return;
         }
         case RoutingFlag::RELAY_TO_CLIENT: {
-            client_->process_incoming_packet(std::move(packet));
+            asio::post(
+                ioc_,
+                [me = shared_from_this(), pkt = std::move(packet)]() mutable{
+                    me->client_->process_incoming_packet(std::move(pkt));
+                }
+            );
             return;
         }
         case RoutingFlag::RELAY_TO_EXIT: {
-            exit_->process_incoming_packet(std::move(packet));
+            asio::post(
+                ioc_,
+                [me = shared_from_this(), pkt = std::move(packet)]() mutable{
+                    me->exit_->process_incoming_packet(std::move(pkt));
+                }
+            );
             return;
         }
         default: {

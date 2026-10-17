@@ -4,11 +4,9 @@
 #include "src/network/packets/cell.hpp"
 #include "src/network/packets/packets.hpp"
 #include "src/node/node_utils.hpp"
-#include "src/node/buffers/reorder_buffer.hpp"
 #include "src/node/buffers/arena_allocator.hpp"
 
 #include <utility>
-#include <vector>
 
 #include <boost/asio.hpp>
 
@@ -94,6 +92,7 @@ private:
     // outgoing
     RCU_UMap<NetworkTuple, std::shared_ptr<CircuitInfo>> nt_ci_umap_;
     RCU_UMap<NetworkTuple, std::shared_ptr<OngoingCircuitCalcInfo>> ci_computing_;
+    std::mutex ci_computing_drain_mtx_;
 
     // incoming
     RCU_UMap<sequence_id_t, std::shared_ptr<CircuitInfo>> sid_ci_umap_;

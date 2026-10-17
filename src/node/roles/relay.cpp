@@ -53,16 +53,16 @@ outgoing packet:
 }
 
 
-asio::awaitable<void> Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
+void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
     if(!parse_packet_from_client(packet)){
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, size<5.");
-        co_return;
+        return;
     }
 
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
     if(exit_info == nullptr){
         LOG_ERROR(logger_, "Dropping invalid packet, no session_id map found.");
-        co_return;
+        return;
     }
 
     // todo: decrypt(packet->payload + sizeof(session_id), exit_info->sh_cr);
@@ -132,16 +132,16 @@ outgoing packet:
 }
 
 
-asio::awaitable<void> Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
+void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
     if(!parse_packet_from_exit(packet)){
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<5.");
-        co_return;
+        return;
     }
 
     std::shared_ptr<ClientInfo> client_info = cid_ci_umap_.get(packet->cid);
     if(client_info == nullptr){
         LOG_WARNING(logger_, "Dropping invalid packet, no circuit_id found.");
-        co_return;
+        return;
     }
     packet->sid = client_info->session_id;
 

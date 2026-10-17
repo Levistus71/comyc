@@ -251,11 +251,15 @@ std::shared_ptr<CircuitInfo> Client::make_new_circuit(NetworkTuple& nt, ArenaSlo
         return nullptr;
     }
 
-    compute_drain_new_circuit(pioneer_state);
+    asio::post(ioc_, [me = shared_from_this(), ps = pioneer_state]{
+        me->compute_drain_new_circuit(ps);
+    });
     return nullptr;
 }
 
-
+// this pattern for custom shared_ptr deletion is fine because there's only 2 threads in contention:
+// 1. the utun read thread  -> has to back to read_packet() after a short time anyway
+// 2. the thread which runs compute_drain_new_circuit()
 void Client::update_nt_ci_umap_after_new_circuit_creation_and_delete_cci(OngoingCircuitCalcInfo* cci){
     if(!cci){
         LOG_CRITICAL(logger_, "Recieved nullptr OngoingCircuitCalcInfo while trying to update nt_ci_umap_");
@@ -278,7 +282,7 @@ void Client::compute_drain_new_circuit(std::shared_ptr<OngoingCircuitCalcInfo> c
     sequence_id_t start_seq = 2385829;
     auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
         .circuit_id      = 1232938,
-        .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(23412),
+        .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(2385829),
         .relays          = std::vector<std::shared_ptr<RelayInfo>>{
             std::make_shared<RelayInfo>(RelayInfo{
                 .session_id = 12321344,
@@ -317,28 +321,32 @@ void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& 
         return;
     }
 
-    // edge-case: if pioneer finished right as we pushed:
+    // edge-case: if circuit-making finished right as we pushed
+    // we can't trust drain_new_circuit_packets() to drain our packet anymore
     if(!curr_state->is_building.load(std::memory_order_acquire)){
-        // get updated circuit info (from curr_state->ci, compute_drain_new_circuit updated this before setting building = false)
-        std::shared_ptr<CircuitInfo> ci = curr_state->ci;
-        if(ci){
-            // race with poineer thread
-            drain_new_circuit_packets(curr_state);
+        // uses updated circuit info (from curr_state->ci, compute_drain_new_circuit updated this before setting is_building = false)
+        if(!curr_state->ci){
+            LOG_CRITICAL(logger_, "curr_state->ci is nullptr in handle_non_pioneers()");
+            return;
         }
-        else{
-            LOG_CRITICAL(logger_, "Logic error: non-pioneer packet circuit info calc: building finished, but didn't"
-                         "find ci in nt_ci_umap_.");
-        }
+        // race with compute_drain_new_circuit
+        // NOTE: MUTEX ON HOT PATH. no way to resolve this
+        drain_new_circuit_packets(curr_state);
     }
 }
 
 
 void Client::drain_new_circuit_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state){
+    // Note: no other alternative, we should use mutex for this
+    // banged my head against the wall for 5 hours
+    std::scoped_lock lock(ci_computing_drain_mtx_);
+
     while(auto popped_pkt = state->pending_packets.try_pop()){
+        sequence_id_t seq_id = (*state->ci->sequence_id_ptr)++;
         asio::post(
             ioc_,
-            [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), state]() mutable{
-                me->continue_process_raw_packet(std::move(temp_pkt), state->ci, (*state->ci->sequence_id_ptr)++);
+            [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), circuit_info = state->ci, seq_id]() mutable{
+                me->continue_process_raw_packet(std::move(temp_pkt), circuit_info, seq_id);
             }
         );
     }
