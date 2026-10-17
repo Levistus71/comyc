@@ -7,6 +7,7 @@
 #include "src/node/buffers/reorder_buffer.hpp"
 #include "src/node/buffers/arena_allocator.hpp"
 
+#include <utility>
 #include <vector>
 
 #include <boost/asio.hpp>
@@ -43,11 +44,15 @@ what should we communicate with the control_server:
 struct OngoingCircuitCalcInfo{
     std::atomic<bool> is_building;
     ArenaSlotQueue<utun::RawPacket> pending_packets;
+    std::shared_ptr<CircuitInfo> ci;
+    NetworkTuple nt;
 
 
-    explicit OngoingCircuitCalcInfo(const size_t queue_sz):
+    explicit OngoingCircuitCalcInfo(const size_t queue_sz, NetworkTuple nt):
         is_building(true),
-        pending_packets(queue_sz){}
+        pending_packets(queue_sz),
+        ci{nullptr},
+        nt{std::move(nt)}{}
 };
 
 
@@ -111,13 +116,19 @@ private:
     void continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci, sequence_id_t seq_id);
 
 
-    void make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet);
+    std::shared_ptr<CircuitInfo> make_new_circuit(NetworkTuple& nt, ArenaSlot<utun::RawPacket>& raw_packet);
 
 
-    void handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& curr_state, const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet);
+    void update_nt_ci_umap_after_new_circuit_creation_and_delete_cci(OngoingCircuitCalcInfo* cci);
 
 
-    void drain_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& state, std::shared_ptr<CircuitInfo> ci);
+    void compute_drain_new_circuit(std::shared_ptr<OngoingCircuitCalcInfo> cci);
+
+
+    void handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& curr_state, ArenaSlot<utun::RawPacket> raw_packet);
+
+
+    void drain_new_circuit_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state);
 
 
     std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);

@@ -107,7 +107,7 @@ void Client::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::err
 }
 
 
-// single_threaded: parse packet, query circuit info, increment seq_id, post continue_process_packet and return
+// single_threaded: parse packet, query circuit info, increment seq_id, asio::post continue_process_packet and return
 void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     if(!raw_packet->parse_packet()){
         LOG_ERROR(logger_, "Dropping faulty packet from utun.");
@@ -124,11 +124,9 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
 
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr) [[unlikely]] {
-        asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), nt_cpy = nt]() mutable{
-            me->make_new_circuit(nt_cpy, std::move(rp));
-        });
-        // make_new_circuit(nt, std::move(raw_packet));
-        return;
+        ci = make_new_circuit(nt, raw_packet);
+        if(ci == nullptr)
+            return;
     }
 
     // update seq_id before returning to read_packet.
@@ -199,44 +197,85 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
 
 
 // multithread_care
-void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet){
+std::shared_ptr<CircuitInfo> Client::make_new_circuit(NetworkTuple& nt, ArenaSlot<utun::RawPacket>& raw_packet){
     // re-check for circuit_info (if poineer finishes everything before running this function)
     {
         const std::shared_ptr<CircuitInfo> check = nt_ci_umap_.get(nt);
         if(check != nullptr){
-            return continue_process_raw_packet(std::move(raw_packet), check, (*check->sequence_id_ptr)++);
+            return check;
         }
     }
 
     std::shared_ptr<OngoingCircuitCalcInfo> prim_state = ci_computing_.get(nt);
 
     if(prim_state){
-        return handle_non_pioneers(prim_state, nt, std::move(raw_packet));
+        handle_non_pioneers(prim_state, std::move(raw_packet));
+        return nullptr;
     }
 
-    // re-check for circuit_info (if pioneer puts in nt_ci_umap_ BUT BEFORE erasing from ci_computing_)
-    // this packet already completed the first check and found nothing in ci_computing_, thinks it's the first packet
-    // but pioneer just completed
+    // re-check for circuit_info (if a non-pioneer runs above checks after pioneer cleans up everything)
+    // first check:
+    //      found nothing in nt_ci_umap_
+    //      pioneer still doing some work
+    // second check:
+    //      found nothing in ci_computing_
+    //      pioneer completed everything, drained all non-pioneers, deleted nt from ci_computing_
     {
         const std::shared_ptr<CircuitInfo> check = nt_ci_umap_.get(nt);
         if(check != nullptr){
-            return continue_process_raw_packet(std::move(raw_packet), check, (*check->sequence_id_ptr)++);
+            return check;
         }
     }
 
-    auto pioneer_state = std::make_shared<OngoingCircuitCalcInfo>(1024);
-    auto [non_pioneer_state, pioneer] = ci_computing_.put_if_absent(nt, pioneer_state);
+    // pioneer packet
+    // this function should return nullptr from now on, we std::move(nt)
 
-    // both pioneer and a non-pioneer completed above checks concurrently
+    // 1. create new OngoingCircuitCalcInfo
+    // 2. push pioneer packet to the front of the queue
+    // 3. put new OngoingCircuitCalcInfo in ci_computing_ map
+    // 4. call compute_drain_new_circuit();
+
+    std::shared_ptr<OngoingCircuitCalcInfo> pioneer_state(
+        new OngoingCircuitCalcInfo(1024, std::move(nt)),
+        [me = shared_from_this()](OngoingCircuitCalcInfo* cci){
+            me->update_nt_ci_umap_after_new_circuit_creation_and_delete_cci(cci);
+        }
+    );
+    pioneer_state->pending_packets.try_push(std::move(raw_packet));
+    auto [non_pioneer_state, pioneer] = ci_computing_.put_if_absent(pioneer_state->nt, pioneer_state);
+
+    // NOT POSSIBLE: both pioneer and a non-pioneer completed above checks concurrently
+    // because we're calling make_new_circuit directly from process_raw_packet (process_raw_packet is "single-threaded")
     if(!pioneer){
-        return handle_non_pioneers(non_pioneer_state, nt, std::move(raw_packet));
+        LOG_CRITICAL(logger_, "Logic error: \"pioneer\" (maybe) failed to put in ci_computing_.");
+        return nullptr;
     }
 
-    // pioneer packet
+    compute_drain_new_circuit(pioneer_state);
+    return nullptr;
+}
 
-    // TODO: async_compute_ci(nt);
 
-    sequence_id_t start_seq = 0; // todo: pioneer packet gets start_seq from new_state, rest all from ci.
+void Client::update_nt_ci_umap_after_new_circuit_creation_and_delete_cci(OngoingCircuitCalcInfo* cci){
+    if(!cci){
+        LOG_CRITICAL(logger_, "Recieved nullptr OngoingCircuitCalcInfo while trying to update nt_ci_umap_");
+        return;
+    }
+
+    if(!cci->ci){
+        LOG_CRITICAL(logger_, "Recieved nullptr CircuitInfo while trying to update nt_ci_umap_");
+        delete cci;
+        return;
+    }
+
+    nt_ci_umap_.put(cci->nt, cci->ci);
+    delete cci;
+}
+
+
+void Client::compute_drain_new_circuit(std::shared_ptr<OngoingCircuitCalcInfo> cci){
+    // TODO: actual circuit computation
+    sequence_id_t start_seq = 2385829;
     auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
         .circuit_id      = 1232938,
         .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(23412),
@@ -248,17 +287,31 @@ void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket>
         },
         .reorder_buffer = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, start_seq) // fixme: remove 2048
     });
-    nt_ci_umap_.put(nt, final_ci);
     sid_ci_umap_.put(12321344, final_ci);
 
-    pioneer_state->is_building.store(false, std::memory_order_release); // set building = false AFTER updating nt_ci_umap_
-    drain_non_pioneers(pioneer_state, final_ci);                        // drain non-pioneers. all others also try to drain (building = false);
-    ci_computing_.erase(nt);
-    continue_process_raw_packet(std::move(raw_packet), final_ci, start_seq);
+
+    // After computing circuit:
+
+    // 1. update OngoingCircuitCalcInfo's ci to the actual ci
+    // 2. cci->is_building = false;
+
+    // steps 1 and 2 prevent this problem:
+    //      * non-pioneer (in handle_non_pioneers()) pushing into the queue just as drain_new_circuit_packets() finishes.
+
+    // 3. drain waiting packets
+    // 4. erase from ci_computing_
+
+    // custom shared_ptr deletion automatically updates nt_ci_umap_
+    //      * packets from now on use the updated and adjusted (for waiting packets) seq_id
+
+    cci->ci = final_ci;
+    cci->is_building.store(false, std::memory_order_release);
+    drain_new_circuit_packets(cci);
+    ci_computing_.erase(cci->nt);
 }
 
 
-void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& curr_state, const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet){
+void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& curr_state, ArenaSlot<utun::RawPacket> raw_packet){
     if(!curr_state->pending_packets.try_push(std::move(raw_packet))){
         LOG_ERROR(logger_, "Failed to push raw_packet into queue while circuit info is being computed.");
         return;
@@ -266,26 +319,26 @@ void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& 
 
     // edge-case: if pioneer finished right as we pushed:
     if(!curr_state->is_building.load(std::memory_order_acquire)){
-        // get updated circuit info (from nt_ci_umap_, pioneer added this before setting building = false)
-        std::shared_ptr<CircuitInfo> ci = nt_ci_umap_.get(nt);
+        // get updated circuit info (from curr_state->ci, compute_drain_new_circuit updated this before setting building = false)
+        std::shared_ptr<CircuitInfo> ci = curr_state->ci;
         if(ci){
             // race with poineer thread
-            drain_non_pioneers(curr_state, ci);
+            drain_new_circuit_packets(curr_state);
         }
         else{
-            LOG_ERROR(logger_, "Logic error: non-pioneer packet circuit info calc: building finished, but didn't"
-                      "find ci in nt_ci_umap_.");
+            LOG_CRITICAL(logger_, "Logic error: non-pioneer packet circuit info calc: building finished, but didn't"
+                         "find ci in nt_ci_umap_.");
         }
     }
 }
 
 
-void Client::drain_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& state, std::shared_ptr<CircuitInfo> ci){
+void Client::drain_new_circuit_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state){
     while(auto popped_pkt = state->pending_packets.try_pop()){
         asio::post(
             ioc_,
-            [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), ci]() mutable{
-                me->continue_process_raw_packet(std::move(temp_pkt), ci, (*ci->sequence_id_ptr)++);
+            [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), state]() mutable{
+                me->continue_process_raw_packet(std::move(temp_pkt), state->ci, (*state->ci->sequence_id_ptr)++);
             }
         );
     }
