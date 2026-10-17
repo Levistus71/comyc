@@ -200,7 +200,7 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
 
 // multithread_care
 void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket> raw_packet){
-    // re-check for circuit_info
+    // re-check for circuit_info (if poineer finishes everything before running this function)
     {
         const std::shared_ptr<CircuitInfo> check = nt_ci_umap_.get(nt);
         if(check != nullptr){
@@ -214,9 +214,20 @@ void Client::make_new_circuit(const NetworkTuple& nt, ArenaSlot<utun::RawPacket>
         return handle_non_pioneers(prim_state, nt, std::move(raw_packet));
     }
 
+    // re-check for circuit_info (if pioneer puts in nt_ci_umap_ BUT BEFORE erasing from ci_computing_)
+    // this packet already completed the first check and found nothing in ci_computing_, thinks it's the first packet
+    // but pioneer just completed
+    {
+        const std::shared_ptr<CircuitInfo> check = nt_ci_umap_.get(nt);
+        if(check != nullptr){
+            return continue_process_raw_packet(std::move(raw_packet), check, (*check->sequence_id_ptr)++);
+        }
+    }
+
     auto pioneer_state = std::make_shared<OngoingCircuitCalcInfo>(1024);
     auto [non_pioneer_state, pioneer] = ci_computing_.put_if_absent(nt, pioneer_state);
 
+    // both pioneer and a non-pioneer completed above checks concurrently
     if(!pioneer){
         return handle_non_pioneers(non_pioneer_state, nt, std::move(raw_packet));
     }

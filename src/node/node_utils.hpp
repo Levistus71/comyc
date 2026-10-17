@@ -1,18 +1,23 @@
 #pragma once
 #include <functional>
-#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <type_traits>
+#include <unordered_map>
 
 #include <src/node/buffers/arena_allocator.hpp>
 #include <src/node/buffers/reorder_buffer.hpp>
+#include "src/network/packets/cell.hpp"
 
 #include <boost/container_hash/hash.hpp>
+#include <boost/asio.hpp>
+
 
 #if !defined(__cpp_lib_atomic_shared_ptr) || __cpp_lib_atomic_shared_ptr < 201711L
 #error "C++ library toolchain doesn't support std::atomic<std::shared_ptr>"
 #endif
+
+namespace asio = boost::asio;
 
 
 template<typename T>
