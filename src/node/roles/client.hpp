@@ -93,7 +93,6 @@ private:
     RCU_UMap<NetworkTuple, std::shared_ptr<CircuitInfo>> nt_ci_umap_;
     RCU_UMap<NetworkTuple, std::shared_ptr<OngoingCircuitCalcInfo>> ci_computing_;
     std::mutex ci_computing_drain_mtx_;
-    std::recursive_mutex ci_computing_ni_ci_update_rec_mtx_;
 
     // incoming
     RCU_UMap<sequence_id_t, std::shared_ptr<CircuitInfo>> sid_ci_umap_;

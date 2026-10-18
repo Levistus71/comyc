@@ -233,7 +233,7 @@ std::shared_ptr<CircuitInfo> Client::make_new_circuit(NetworkTuple& nt, ArenaSlo
     // 1. create new OngoingCircuitCalcInfo
     // 2. push pioneer packet to the front of the queue
     // 3. put new OngoingCircuitCalcInfo in ci_computing_ map
-    // 4. call compute_drain_new_circuit();
+    // 4. post compute_drain_new_circuit();
 
     auto pioneer_state = std::make_shared<OngoingCircuitCalcInfo>(1024, std::move(nt));
     pioneer_state->pending_packets.try_push(std::move(raw_packet));
@@ -278,11 +278,8 @@ void Client::compute_drain_new_circuit(std::shared_ptr<OngoingCircuitCalcInfo> c
     // steps 1 and 2 prevent this problem:
     //      * non-pioneer (in handle_non_pioneers()) pushing into the queue just as drain_new_circuit_packets() finishes.
 
-    // 3. drain waiting packets
+    // 3. drain waiting packets         -> updates nt_ci_umap_
     // 4. erase from ci_computing_
-
-    // custom shared_ptr deletion automatically updates nt_ci_umap_
-    //      * packets from now on use the updated and adjusted (for waiting packets) seq_id
 
     cci->ci = final_ci;
     cci->is_building.store(false, std::memory_order_release);
@@ -305,10 +302,8 @@ void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& 
             LOG_CRITICAL(logger_, "curr_state->ci is nullptr in handle_non_pioneers()");
             return;
         }
-        // race with compute_drain_new_circuit
+        // call compute_drain_new_circuit
         // NOTE: MUTEX ON HOT PATH. no way to resolve this
-
-        std::lock_guard<std::recursive_mutex> lock(ci_computing_ni_ci_update_rec_mtx_);
         drain_new_circuit_packets(curr_state);
     }
 }
@@ -317,25 +312,21 @@ void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& 
 void Client::drain_new_circuit_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state){
     // Note: no other alternative, we should use mutex for this
     // banged my head against the wall for 5 hours
+    std::scoped_lock lock(ci_computing_drain_mtx_);
 
-    {
-        std::scoped_lock lock(ci_computing_drain_mtx_);
-
-        while(auto popped_pkt = state->pending_packets.try_pop()){
-            sequence_id_t seq_id = (*state->ci->sequence_id_ptr)++;
-            asio::post(
-                ioc_,
-                [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), circuit_info = state->ci, seq_id]() mutable{
-                    me->continue_process_raw_packet(std::move(temp_pkt), circuit_info, seq_id);
-                }
-            );
-        }
+    while(auto popped_pkt = state->pending_packets.try_pop()){
+        // Note: since handle_new_pioneer() also updates the same state->ci's sequence id,
+        // even if the poineer updates the nt_ci_umap_, the seq_id gets incremented.
+        sequence_id_t seq_id = (*state->ci->sequence_id_ptr)++;
+        asio::post(
+            ioc_,
+            [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), circuit_info = state->ci, seq_id]() mutable{
+                me->continue_process_raw_packet(std::move(temp_pkt), circuit_info, seq_id);
+            }
+        );
     }
 
-    {
-        std::lock_guard<std::recursive_mutex> lock(ci_computing_ni_ci_update_rec_mtx_);
-        nt_ci_umap_.put_if_absent(state->nt, state->ci);
-    }
+    nt_ci_umap_.put_if_absent(state->nt, state->ci);
 }
 
 
