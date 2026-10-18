@@ -235,12 +235,7 @@ std::shared_ptr<CircuitInfo> Client::make_new_circuit(NetworkTuple& nt, ArenaSlo
     // 3. put new OngoingCircuitCalcInfo in ci_computing_ map
     // 4. call compute_drain_new_circuit();
 
-    std::shared_ptr<OngoingCircuitCalcInfo> pioneer_state(
-        new OngoingCircuitCalcInfo(1024, std::move(nt)),
-        [me = shared_from_this()](OngoingCircuitCalcInfo* cci){
-            me->update_nt_ci_umap_after_new_circuit_creation_and_delete_cci(cci);
-        }
-    );
+    auto pioneer_state = std::make_shared<OngoingCircuitCalcInfo>(1024, std::move(nt));
     pioneer_state->pending_packets.try_push(std::move(raw_packet));
     auto [non_pioneer_state, pioneer] = ci_computing_.put_if_absent(pioneer_state->nt, pioneer_state);
 
@@ -255,25 +250,6 @@ std::shared_ptr<CircuitInfo> Client::make_new_circuit(NetworkTuple& nt, ArenaSlo
         me->compute_drain_new_circuit(ps);
     });
     return nullptr;
-}
-
-// this pattern for custom shared_ptr deletion is fine because there's only 2 threads in contention:
-// 1. the utun read thread  -> has to back to read_packet() after a short time anyway
-// 2. the thread which runs compute_drain_new_circuit()
-void Client::update_nt_ci_umap_after_new_circuit_creation_and_delete_cci(OngoingCircuitCalcInfo* cci){
-    if(!cci){
-        LOG_CRITICAL(logger_, "Recieved nullptr OngoingCircuitCalcInfo while trying to update nt_ci_umap_");
-        return;
-    }
-
-    if(!cci->ci){
-        LOG_CRITICAL(logger_, "Recieved nullptr CircuitInfo while trying to update nt_ci_umap_");
-        delete cci;
-        return;
-    }
-
-    nt_ci_umap_.put(cci->nt, cci->ci);
-    delete cci;
 }
 
 
@@ -331,6 +307,8 @@ void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& 
         }
         // race with compute_drain_new_circuit
         // NOTE: MUTEX ON HOT PATH. no way to resolve this
+
+        std::lock_guard<std::recursive_mutex> lock(ci_computing_ni_ci_update_rec_mtx_);
         drain_new_circuit_packets(curr_state);
     }
 }
@@ -339,16 +317,24 @@ void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& 
 void Client::drain_new_circuit_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state){
     // Note: no other alternative, we should use mutex for this
     // banged my head against the wall for 5 hours
-    std::scoped_lock lock(ci_computing_drain_mtx_);
 
-    while(auto popped_pkt = state->pending_packets.try_pop()){
-        sequence_id_t seq_id = (*state->ci->sequence_id_ptr)++;
-        asio::post(
-            ioc_,
-            [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), circuit_info = state->ci, seq_id]() mutable{
-                me->continue_process_raw_packet(std::move(temp_pkt), circuit_info, seq_id);
-            }
-        );
+    {
+        std::scoped_lock lock(ci_computing_drain_mtx_);
+
+        while(auto popped_pkt = state->pending_packets.try_pop()){
+            sequence_id_t seq_id = (*state->ci->sequence_id_ptr)++;
+            asio::post(
+                ioc_,
+                [me = shared_from_this(), temp_pkt = std::move(*popped_pkt), circuit_info = state->ci, seq_id]() mutable{
+                    me->continue_process_raw_packet(std::move(temp_pkt), circuit_info, seq_id);
+                }
+            );
+        }
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(ci_computing_ni_ci_update_rec_mtx_);
+        nt_ci_umap_.put_if_absent(state->nt, state->ci);
     }
 }
 
