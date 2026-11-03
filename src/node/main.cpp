@@ -81,22 +81,43 @@ int main(){
     // fixme: role should be decided dynamically
     constexpr auto role = NodeRole::CLIENT_RELAY;
     const auto node = std::make_shared<Node>(ioc, role);
-    LOG_INFO(main_logger, "Trying node->start().");
-    if(!node->start()){
-        LOG_ERROR(main_logger, "Node couldn't start. Aborting.");
-        return 1;
-    }
-    LOG_INFO(main_logger, "Node started.");
+
+    auto shutdown = [&]() {
+        LOG_INFO(main_logger, "Stopping node and releasing work guard.");
+        node->stop();
+        work_guard.reset(); // ioc.run() to returns once remaining handlers finish
+    };
 
     // capture signints or sigterms (for clean exit, communicate with relays/exit, kill utun etc)
     asio::signal_set signals(ioc, SIGINT, SIGTERM);
     signals.async_wait([&](const boost::system::error_code& error, int /*signal_number*/){
         if(!error){
             LOG_INFO(main_logger, "Sigint/Sigterm. Stopping Initiated.");
-            node->stop();
-            work_guard.reset();
-            ioc.stop();
+            shutdown();
         }
+    });
+
+    asio::post(ioc, [&ioc, main_logger, node, shutdown](){
+        LOG_INFO(main_logger, "Trying node->start().");
+        asio::co_spawn(ioc, node->start(), [main_logger, shutdown](const std::exception_ptr& e, const bool result){
+            if(!e){
+                if(result)
+                    LOG_INFO(main_logger, "Node started.");
+                else{
+                    LOG_ERROR(main_logger, "Node couldn't start. Aborting.");
+                    shutdown();
+                }
+            }
+            else{
+                try{
+                    std::rethrow_exception(e);
+                }
+                catch(const std::exception& ex){
+                    LOG_ERROR(main_logger, "coroutine threw exception: {}", ex.what());
+                }
+                shutdown();
+            }
+        });
     });
 
     // thread_pool

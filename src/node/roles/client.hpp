@@ -56,7 +56,10 @@ struct OngoingCircuitCalcInfo{
 
 class Client : public std::enable_shared_from_this<Client>{
 public:
-    Client(asio::io_context& ioc, asio::ip::udp::socket& udp_socketv4, asio::ip::udp::socket& udp_socketv6);
+    Client(asio::io_context& ioc,
+           std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
+           std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
+           std::shared_ptr<RelaysInfoGlb> known_relays);
 
 
     ~Client();
@@ -78,10 +81,12 @@ public:
 
 private:
     asio::io_context& ioc_;
-    asio::ip::udp::socket& udp_socketv4_;
-    asio::ip::udp::socket& udp_socketv6_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv4_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv6_;
 
     std::atomic<bool> running_;
+
+    std::shared_ptr<RelaysInfoGlb> known_relays_;
 
     ArenaAllocator<utun::RawPacket> raw_packet_pool_;
 

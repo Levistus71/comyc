@@ -3,10 +3,12 @@
 #include <quill/LogMacros.h>
 
 
-Exit::Exit(asio::io_context& ioc, asio::ip::udp::socket& udp_socketv4, asio::ip::udp::socket& udp_socketv6):
+Exit::Exit(asio::io_context& ioc,
+           std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
+           std::shared_ptr<asio::ip::udp::socket> udp_socketv6):
     ioc_(ioc),
-    udp_socketv4_(udp_socketv4),
-    udp_socketv6_(udp_socketv6),
+    udp_socketv4_(std::move(udp_socketv4)),
+    udp_socketv6_(std::move(udp_socketv6)),
     running_(false),
     raw_packet_pool_(16384, "exit_logger"),
     utun_stream_(ioc_),
@@ -150,10 +152,12 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
         asio::buffer(raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes)
     };
 
-    asio::ip::udp::socket& sock = (relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+    std::shared_ptr<asio::ip::udp::socket> sock = (relay->endpoint.protocol() == asio::ip::udp::v4())
+                                                      ? udp_socketv4_
+                                                      : udp_socketv6_;
 
     // @formatter:off
-    sock.async_send_to(
+    sock->async_send_to(
         outgoing,
         relay->endpoint,
         // raw_packet and headers in the lambda to make sure it doesn't get destroyed

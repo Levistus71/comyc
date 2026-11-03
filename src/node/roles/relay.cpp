@@ -4,10 +4,14 @@
 #include <quill/Frontend.h>
 
 
-Relay::Relay(asio::io_context& ioc, asio::ip::udp::socket& sockv4, asio::ip::udp::socket& sockv6):
+Relay::Relay(asio::io_context& ioc,
+             std::shared_ptr<asio::ip::udp::socket> sockv4,
+             std::shared_ptr<asio::ip::udp::socket> sockv6,
+             std::shared_ptr<RelaysInfoGlb> known_relays):
     ioc_(ioc),
-    udp_socketv4_(sockv4),
-    udp_socketv6_(sockv6){
+    udp_socketv4_(std::move(sockv4)),
+    udp_socketv6_(std::move(sockv6)),
+    known_relays_(std::move(known_relays)){
     logger_ = quill::Frontend::get_logger("relay_logger");
 }
 
@@ -34,7 +38,7 @@ outgoing packet:
     route_flag
     {thdr, phdr, payload}
 */
-[[nodiscard]] static bool parse_packet_from_client(const ArenaSlot<IncomingCell>& packet){
+[[nodiscard]] static bool parse_upper_packet_from_client(const ArenaSlot<IncomingCell>& packet){
     if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t)){
         return false;
     }
@@ -53,19 +57,35 @@ outgoing packet:
 }
 
 
-void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
-    if(!parse_packet_from_client(packet)){
+[[nodiscard]] static bool parse_thdr_from_client(const ArenaSlot<IncomingCell>& packet){}
+
+
+void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet){
+    if(!parse_upper_packet_from_client(packet)){
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, size<5.");
         return;
     }
+    // todo: decrypt(packet->payload + sizeof(session_id), exit_info->sh_cr);
+    if(!parse_thdr_from_client(packet)){
+        LOG_ERROR(logger_, "Dropping faulty packet, route_packet, unable to parse thdr.");
+        return;
+    }
+    // todo: if flag == new connection: handle
+    forward_to_exit(std::move(packet));
+}
 
+
+void Relay::process_packet_from_exit(ArenaSlot<IncomingCell> packet){
+    forward_to_client(std::move(packet));
+}
+
+
+void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
     if(exit_info == nullptr){
         LOG_ERROR(logger_, "Dropping invalid packet, no session_id map found.");
         return;
     }
-
-    // todo: decrypt(packet->payload + sizeof(session_id), exit_info->sh_cr);
 
     /*
     incoming packet:
@@ -81,9 +101,11 @@ void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
         asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
     };
 
-    asio::ip::udp::socket& sock = (exit_info->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+    const std::shared_ptr<asio::ip::udp::socket> sock = (exit_info->endpoint.protocol() == asio::ip::udp::v4())
+                                                      ? udp_socketv4_
+                                                      : udp_socketv6_;
 
-    sock.async_send_to(
+    sock->async_send_to(
         outgoing,
         exit_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.
@@ -162,9 +184,11 @@ void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
         asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
     };
 
-    asio::ip::udp::socket& sock = (client_info->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+    std::shared_ptr<asio::ip::udp::socket> sock = (client_info->endpoint.protocol() == asio::ip::udp::v4())
+                                                      ? udp_socketv4_
+                                                      : udp_socketv6_;
 
-    sock.async_send_to(
+    sock->async_send_to(
         outgoing,
         client_info->endpoint,
         // packet in lambda to make sure it doesn't get destroyed.

@@ -9,7 +9,6 @@
 #include <quill/Logger.h>
 
 
-
 namespace asio = boost::asio;
 
 
@@ -28,7 +27,10 @@ struct ClientInfo{
 
 class Relay : public std::enable_shared_from_this<Relay>{
 public:
-    Relay(asio::io_context& ioc, asio::ip::udp::socket& sockv4, asio::ip::udp::socket& sockv6);
+    Relay(asio::io_context& ioc,
+          std::shared_ptr<asio::ip::udp::socket> sockv4,
+          std::shared_ptr<asio::ip::udp::socket> sockv6,
+          std::shared_ptr<RelaysInfoGlb>);
 
 
     ~Relay();
@@ -40,16 +42,22 @@ public:
     void stop();
 
 
+    void process_packet_from_client(ArenaSlot<IncomingCell> packet);
+
+
+    void process_packet_from_exit(ArenaSlot<IncomingCell> packet);
+
+private:
+    asio::io_context& ioc_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv4_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv6_;
+    std::shared_ptr<RelaysInfoGlb> known_relays_;
+    RCU_UMap<session_id_t, ExitInfo> sid_ei_umap_;
+    RCU_UMap<circuit_id_t, ClientInfo> cid_ci_umap_;
+    quill::Logger* logger_{nullptr};
+
     void forward_to_exit(ArenaSlot<IncomingCell> packet);
 
 
     void forward_to_client(ArenaSlot<IncomingCell> packet);
-
-private:
-    asio::io_context& ioc_;
-    asio::ip::udp::socket& udp_socketv4_;
-    asio::ip::udp::socket& udp_socketv6_;
-    RCU_UMap<session_id_t, ExitInfo> sid_ei_umap_;
-    RCU_UMap<circuit_id_t, ClientInfo> cid_ci_umap_;
-    quill::Logger* logger_{nullptr};
 };

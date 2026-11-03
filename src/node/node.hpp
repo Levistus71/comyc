@@ -5,6 +5,7 @@
 #include "src/network/packets/cell.hpp"
 
 #include <boost/asio.hpp>
+#include <utility>
 
 namespace asio = boost::asio;
 
@@ -61,11 +62,62 @@ public:
     Node(asio::io_context& ioc, NodeRole role);
 
 
-    [[nodiscard]] bool start();
+    [[nodiscard]] asio::awaitable<bool> start();
 
 
     void stop();
 
+
+    class CommError{
+    public:
+        explicit CommError(const bool errored, std::string msg):
+            erred(errored),
+            message(std::move(msg)){}
+
+
+        explicit CommError(const bool errored){
+            if(errored){
+                erred = true;
+                message = "creator of this error kept the error message secret";
+            }
+            else
+                erred = false;
+        }
+
+
+        explicit CommError(std::string msg):
+            erred(true),
+            message(std::move(msg)){}
+
+
+        [[nodiscard]] const char* what() const noexcept{
+            return message.c_str();
+        }
+
+
+        explicit operator bool() const noexcept{
+            return erred;
+        }
+
+    private:
+        bool erred;
+        std::string message;
+    };
+
+
+    static asio::awaitable<CommError> populate_relays(std::shared_ptr<RelaysInfoGlb> known_relays,
+                                                      RelayInfo start_relay,
+                                                      std::shared_ptr<asio::ip::udp::socket> udp_sockv4);
+
+
+    static asio::awaitable<CommError> establish_connection(RelayInfo relay,
+                                                           std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
+                                                           std::shared_ptr<RelaysInfoGlb> known_relays);
+
+
+    static void resume_establishing_connection(session_id_t session_id,
+                                               std::vector<uint8_t> payload,
+                                               std::shared_ptr<RelaysInfoGlb> relays_info_glb);
 
     /*
         we need to listen for incoming packets and route it to either client or relay
@@ -86,20 +138,60 @@ private:
 
     std::atomic<bool> running_;
 
+    std::shared_ptr<RelaysInfoGlb> relays_info_glb_ = nullptr;
+    static constexpr size_t DESIRED_RELAY_COUNT = 10;
+
+
+    struct udp_comms_config{
+        static constexpr size_t max_attempts = 5;
+        static constexpr auto start_timeout = std::chrono::milliseconds(100);
+    };
+
+
+    RelayInfo bootstrap_node_;
+
     std::shared_ptr<Client> client_ = nullptr;
     std::shared_ptr<Relay> relay_ = nullptr;
     std::shared_ptr<Exit> exit_ = nullptr;
 
     asio::io_context& ioc_;
-    asio::ip::udp::socket udp_socketv4_;
-    asio::ip::udp::socket udp_socketv6_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv4_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv6_;
 
     asio::ip::udp::endpoint listening_endpoint_;
-    std::shared_ptr<asio::ip::udp::endpoint> ignore_endpoint_;
+    std::shared_ptr<asio::ip::udp::endpoint> sender_endpoint_;
 
     ArenaAllocator<IncomingCell> incoming_cell_pool_;
 
     quill::Logger* logger_{nullptr};
+
+
+    static bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays);
+
+
+    static std::vector<uint8_t> make_connection_packet(RelayInfo& relay);
+
+
+    static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay);
+
+
+    template<class CompletionToken>
+    static auto async_wait_for_response(session_id_t session_id, CompletionToken&& token, const std::shared_ptr<RelaysInfoGlb>& relays_info_glb){
+        using Signature = void(boost::system::error_code, std::vector<uint8_t>);
+
+        return asio::async_initiate<CompletionToken, Signature>(
+            [session_id, relays_info_glb](auto handler){
+                auto unbound_handler = [h = std::move(handler)](boost::system::error_code ec, std::vector<uint8_t> data) mutable{
+                    h(ec, std::move(data));
+                };
+
+                std::mutex& mtx = relays_info_glb->registry_mutex_;
+                std::lock_guard<std::mutex> lock(mtx);
+                relays_info_glb->pending_requests_[session_id] = std::move(unbound_handler);
+            },
+            token
+        );
+    }
 
 
     void listenv4(ArenaSlot<IncomingCell> packet);
@@ -111,5 +203,5 @@ private:
     void loop_listen(ArenaSlot<IncomingCell> packet, const boost::system::error_code& ec, bool ipv4);
 
 
-    void route_packet(ArenaSlot<IncomingCell> packet) const;
+    void route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint endpoint) const;
 };

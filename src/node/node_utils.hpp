@@ -4,6 +4,7 @@
 #include <mutex>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <src/node/buffers/arena_allocator.hpp>
 #include <src/node/buffers/reorder_buffer.hpp>
@@ -261,10 +262,27 @@ struct std::hash<NetworkTuple>{
 
 
 struct RelayInfo{
-    session_id_t session_id;
+    session_id_t session_id = -1;           // -1 : not connected, else : connected
     asio::ip::udp::endpoint endpoint;
     // relay performance
     // sh_cr
+
+    bool operator==(const RelayInfo& other) const{
+        return endpoint == other.endpoint;
+    }
+};
+
+
+template<>
+struct std::hash<RelayInfo>{
+    std::size_t operator()(const RelayInfo& info) const noexcept{
+        std::size_t seed = 0;
+
+        boost::hash_combine(seed, std::hash<std::string>{}(info.endpoint.address().to_string()));
+        boost::hash_combine(seed, std::hash<uint16_t>{}(info.endpoint.port()));
+
+        return seed;
+    }
 };
 
 
@@ -274,4 +292,14 @@ struct CircuitInfo{
     std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
     // sh_ce
     std::shared_ptr<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>> reorder_buffer;
+};
+
+
+struct RelaysInfoGlb{
+    using ResponseHandler = std::function<void(boost::system::error_code, std::vector<uint8_t>)>;
+
+    std::unordered_set<RelayInfo> all_relays;
+    std::unordered_set<RelayInfo> usable_relays;
+    std::mutex registry_mutex_;
+    std::unordered_map<session_id_t, ResponseHandler> pending_requests_;
 };

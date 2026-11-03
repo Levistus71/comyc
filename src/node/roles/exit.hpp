@@ -62,7 +62,9 @@ we don't need to add/delete routes, just set up this interface and write/read fr
 
 class Exit : public std::enable_shared_from_this<Exit>{
 public:
-    Exit(asio::io_context& ioc, asio::ip::udp::socket& udp_socketv4, asio::ip::udp::socket& udp_socketv6);
+    Exit(asio::io_context& ioc,
+         std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
+         std::shared_ptr<asio::ip::udp::socket> udp_socketv6);
 
 
     ~Exit();
@@ -78,8 +80,8 @@ public:
 
 private:
     asio::io_context& ioc_;
-    asio::ip::udp::socket& udp_socketv4_;
-    asio::ip::udp::socket& udp_socketv6_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv4_;
+    std::shared_ptr<asio::ip::udp::socket> udp_socketv6_;
 
     std::atomic<bool> running_;
 
