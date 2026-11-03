@@ -1,6 +1,9 @@
 #include "src/node/roles/client.hpp"
 #include "src/network/packets/packets.hpp"
 #include "src/network/sockets/utun.hpp"
+#include "src/network/comms/control.hpp"
+#include "src/node/node.hpp"
+
 
 #include <ifaddrs.h>
 #include <net/route.h>
@@ -366,6 +369,11 @@ void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
         return;
     }
 
+    if(packet->cid == static_cast<circuit_id_t>(-1)){
+        handle_control_from_relay(packet);
+        return;
+    }
+
     insert_into_rob(std::move(packet));
 }
 
@@ -408,6 +416,28 @@ incoming packet:
     packet->ip_version_macos = htonl(AF_INET);
 
     return true;
+}
+
+
+void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) const{
+    constexpr size_t header_len = sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ;
+    if(packet->bytes_received < header_len + CONTROL_HDR_SZ){
+        LOG_ERROR(logger_, "Dropping control packet from relay: size too small ({})", packet->bytes_received);
+        return;
+    }
+
+    ControlHeader chdr{};
+    std::memcpy(&chdr, packet->payload.data() + header_len, CONTROL_HDR_SZ);
+
+    const uint8_t* body_ptr = packet->payload.data() + header_len + CONTROL_HDR_SZ;
+    const size_t body_len = packet->bytes_received - (header_len + CONTROL_HDR_SZ);
+
+    std::vector<uint8_t> payload_data(body_ptr, body_ptr + body_len);
+
+    if(chdr.flags == static_cast<uint8_t>(ControlMsgType::RELAY_HANDSHAKE_RESP) && known_relays_){
+        Node::resume_establishing_connection(packet->sid, std::move(payload_data), known_relays_);
+        return;
+    }
 }
 
 

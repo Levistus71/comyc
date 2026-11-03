@@ -23,6 +23,13 @@ enum class RoutingFlag : uint8_t{
 };
 
 
+enum class ThdrFlag : uint16_t {
+    DEFAULT = 0,
+    CONTROL = 1,
+};
+
+
+
 // // this macro might lead to deadly bugs and performance inefficiencies later on
 // // #pragma pack(push, 1)       // ? START: Tell compiler not to optimize this to 2^n bytes using padding
 

@@ -39,6 +39,10 @@ what should we communicate with the control_server:
 */
 
 
+// forward declaration of node class
+class Node;
+
+
 struct OngoingCircuitCalcInfo{
     std::atomic<bool> is_building;
     ArenaSlotQueue<utun::RawPacket> pending_packets;
@@ -136,6 +140,9 @@ private:
 
 
     [[nodiscard]] static bool parse_incoming_packet(const ArenaSlot<IncomingCell>& packet);
+
+
+    void handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) const;
 
 
     void insert_into_rob(ArenaSlot<IncomingCell> packet);

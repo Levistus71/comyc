@@ -29,8 +29,12 @@ enum class ControlMsgType : uint8_t{
     HEARTBEAT_PING = 11,
     HEARTBEAT_PONG = 12,
 
+    // client asking relay to store exit information (client | relay)
+    RELAY_SETUP_EXIT_REQ = 13,
+    RELAY_SETUP_EXIT_RES = 14,
+
     // error
-    CONTROL_ERROR = 13
+    CONTROL_ERROR = 15
 };
 
 

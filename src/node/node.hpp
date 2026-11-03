@@ -119,6 +119,7 @@ public:
                                                std::vector<uint8_t> payload,
                                                std::shared_ptr<RelaysInfoGlb> relays_info_glb);
 
+
     /*
         we need to listen for incoming packets and route it to either client or relay
 
@@ -172,7 +173,12 @@ private:
     static std::vector<uint8_t> make_connection_packet(RelayInfo& relay);
 
 
-    static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay);
+    static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay,
+                                                                      std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
+                                                                      std::shared_ptr<RelaysInfoGlb> relays_info_glb);
+
+
+    static std::vector<uint8_t> make_request_relay_list_packet(RelayInfo& relay);
 
 
     template<class CompletionToken>

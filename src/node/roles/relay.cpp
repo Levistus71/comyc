@@ -1,7 +1,10 @@
 #include "src/node/roles/relay.hpp"
+#include "src/network/comms/control.hpp"
 
 #include <quill/LogMacros.h>
 #include <quill/Frontend.h>
+
+#include <utility>
 
 
 Relay::Relay(asio::io_context& ioc,
@@ -57,21 +60,198 @@ outgoing packet:
 }
 
 
-[[nodiscard]] static bool parse_thdr_from_client(const ArenaSlot<IncomingCell>& packet){}
+[[nodiscard]] static bool parse_cid_from_client(const ArenaSlot<IncomingCell>& packet){
+    if(packet->payload_bytes < TRANSIT_HDR_SZ){
+        return false;
+    }
+    TransitHeader thdr{};
+    std::memcpy(&thdr, packet->payload.data() + packet->start_offset, TRANSIT_HDR_SZ);
+    packet->cid = thdr.circuit_id;
+    return true;
+}
 
 
-void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet){
+void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asio::ip::udp::endpoint& sender_endpoint){
     if(!parse_upper_packet_from_client(packet)){
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, size<5.");
         return;
     }
     // todo: decrypt(packet->payload + sizeof(session_id), exit_info->sh_cr);
-    if(!parse_thdr_from_client(packet)){
-        LOG_ERROR(logger_, "Dropping faulty packet, route_packet, unable to parse thdr.");
+    if(!parse_cid_from_client(packet)){
+        LOG_ERROR(logger_, "Dropping faulty packet, route_packet, unable to find cid.");
         return;
     }
-    // todo: if flag == new connection: handle
+
+    if(packet->cid == static_cast<circuit_id_t>(-1)){
+        const uint8_t* control_data = packet->payload.data() + packet->start_offset + TRANSIT_HDR_SZ;
+        const size_t control_len = packet->payload_bytes - TRANSIT_HDR_SZ;
+        handle_control_from_client(packet->sid, control_data, control_len, sender_endpoint);
+        return;
+    }
+
     forward_to_exit(std::move(packet));
+}
+
+
+static std::vector<uint8_t> make_relay_handshake_rep_pakcet(const session_id_t sid, const ControlHeader& chdr){
+    std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayHandshakeRes));
+    size_t offset = 0;
+
+    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::RELAY_TO_CLIENT);
+    offset += sizeof(RoutingFlag);
+
+    for(size_t i = 0; i < sizeof(session_id_t); i++){
+        resp_buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
+    }
+    offset += sizeof(session_id_t);
+
+    TransitHeader thdr{};
+    thdr.circuit_id = static_cast<circuit_id_t>(-1);
+    thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelayHandshakeRes));
+    thdr.flags = 1;
+    thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(resp_buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader resp_chdr{};
+    resp_chdr.msg_type = ControlMsgType::RELAY_HANDSHAKE_RESP;
+    resp_chdr.flags = 0;
+    resp_chdr.payload_len = static_cast<uint16_t>(sizeof(RelayHandshakeRes));
+    resp_chdr.sequence_id = chdr.sequence_id;
+    std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    constexpr RelayHandshakeRes res{};
+    std::memcpy(resp_buf.data() + offset, &res, sizeof(RelayHandshakeRes));
+
+    return resp_buf;
+}
+
+
+static std::vector<uint8_t> make_relay_list_rep_packet(const session_id_t sid, const ControlHeader& chdr, const RelayListRes& res){
+    std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayListRes));
+    size_t offset = 0;
+
+    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::RELAY_TO_CLIENT);
+    offset += sizeof(RoutingFlag);
+
+    for(size_t i = 0; i < sizeof(session_id_t); i++){
+        resp_buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
+    }
+    offset += sizeof(session_id_t);
+
+    TransitHeader thdr{};
+    thdr.circuit_id = static_cast<circuit_id_t>(-1);
+    thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelayListRes));
+    thdr.flags = 1;
+    thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(resp_buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader resp_chdr{};
+    resp_chdr.msg_type = ControlMsgType::RELAY_DISCOVERY_RESP;
+    resp_chdr.flags = 0;
+    resp_chdr.payload_len = static_cast<uint16_t>(sizeof(RelayListRes));
+    resp_chdr.sequence_id = chdr.sequence_id;
+    std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    std::memcpy(resp_buf.data() + offset, &res, sizeof(RelayListRes));
+
+    return resp_buf;
+}
+
+
+void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint){
+    if(len < CONTROL_HDR_SZ){
+        LOG_ERROR(logger_, "Dropping control packet from client: length too small ({})", len);
+        return;
+    }
+
+    ControlHeader chdr{};
+    std::memcpy(&chdr, data, CONTROL_HDR_SZ);
+
+    const uint8_t* msg_body = data + CONTROL_HDR_SZ;
+    const size_t body_len = len - CONTROL_HDR_SZ;
+
+    switch(chdr.msg_type){
+        case ControlMsgType::RELAY_HANDSHAKE_REQ: {
+            if(body_len < sizeof(RelayHandshakeReq)){
+                LOG_ERROR(logger_, "RelayHandshakeReq payload too small.");
+                return;
+            }
+            RelayHandshakeReq req{};
+            std::memcpy(&req, msg_body, sizeof(RelayHandshakeReq));
+
+            const ClientInfo cinfo{
+                .session_id = sid,
+                .endpoint   = sender_endpoint
+            };
+            // exit information is not yet confirmed.
+            sid_ci_umap_.put_if_absent(sid, cinfo);
+
+            auto resp_buf = make_relay_handshake_rep_pakcet(sid, chdr);
+
+            const auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+            auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
+            sock->async_send_to(
+                asio::buffer(*send_data),
+                sender_endpoint,
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                    if(ec){
+                        LOG_ERROR(me->logger_, "Failed to send RelayHandshakeRes: {}", ec.message());
+                    }
+                }
+            );
+            return;
+        }
+
+        case ControlMsgType::RELAY_DISCOVERY_REQ: {
+            if(body_len < sizeof(RelayListReq)){
+                LOG_ERROR(logger_, "RelayListReq payload too small.");
+                return;
+            }
+            RelayListReq req{};
+            std::memcpy(&req, msg_body, sizeof(RelayListReq));
+
+            RelayListRes res{};
+            uint16_t populated = 0;
+            if(known_relays_){
+                std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
+                for(const auto& rinfo: known_relays_->all_relays){
+                    if(populated >= MAX_RELAY_LIST_SZ || populated >= req.relays_requested)
+                        break;
+                    if(rinfo.endpoint.address().is_v4()){
+                        res.relays[populated].ipv4 = htonl(rinfo.endpoint.address().to_v4().to_uint());
+                        res.relays[populated].port = htons(rinfo.endpoint.port());
+                        res.relays[populated].nat = 0;
+                        res.relays[populated].bandwidth_tier = 0;
+                        populated++;
+                    }
+                }
+            }
+            res.count = populated;
+
+            auto resp_buf = make_relay_list_rep_packet(sid, chdr, res);
+
+            auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+            auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
+            sock->async_send_to(
+                asio::buffer(*send_data),
+                sender_endpoint,
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                    if(ec){
+                        LOG_ERROR(me->logger_, "Failed to send RelayListRes: {}", ec.message());
+                    }
+                }
+            );
+            return;
+        }
+
+        default:
+            LOG_WARNING(logger_, "Unhandled client control message: {}", static_cast<int>(chdr.msg_type));
+            break;
+    }
 }
 
 
@@ -102,8 +282,8 @@ void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
     };
 
     const std::shared_ptr<asio::ip::udp::socket> sock = (exit_info->endpoint.protocol() == asio::ip::udp::v4())
-                                                      ? udp_socketv4_
-                                                      : udp_socketv6_;
+                                                            ? udp_socketv4_
+                                                            : udp_socketv6_;
 
     sock->async_send_to(
         outgoing,

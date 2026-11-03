@@ -42,7 +42,7 @@ public:
     void stop();
 
 
-    void process_packet_from_client(ArenaSlot<IncomingCell> packet);
+    void process_packet_from_client(ArenaSlot<IncomingCell> packet, const asio::ip::udp::endpoint& sender_endpoint);
 
 
     void process_packet_from_exit(ArenaSlot<IncomingCell> packet);
@@ -54,7 +54,12 @@ private:
     std::shared_ptr<RelaysInfoGlb> known_relays_;
     RCU_UMap<session_id_t, ExitInfo> sid_ei_umap_;
     RCU_UMap<circuit_id_t, ClientInfo> cid_ci_umap_;
+    RCU_UMap<session_id_t, ClientInfo> sid_ci_umap_;
     quill::Logger* logger_{nullptr};
+
+
+    void handle_control_from_client(session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint);
+
 
     void forward_to_exit(ArenaSlot<IncomingCell> packet);
 

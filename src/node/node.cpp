@@ -23,6 +23,8 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
 
     bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 8008);
 
+    sender_endpoint_ = std::make_shared<asio::ip::udp::endpoint>();
+
     // todo: start client, start relay, start exit? based on the role.
     const bool is_client = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::CLIENT);
     const bool is_relay = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::RELAY);
@@ -163,7 +165,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
             known_relays->usable_relays.insert(current);
         }
 
-        std::vector<RelayInfo> relay_list = co_await request_relay_list(current);
+        std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays);
 
         // randomize
         std::ranges::shuffle(relay_list, rng);
@@ -204,6 +206,142 @@ bool Node::is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unorde
         }
     }
     return true;
+}
+
+
+std::vector<uint8_t> Node::make_connection_packet(RelayInfo& relay){
+    std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayHandshakeReq));
+
+    size_t offset = 0;
+
+    // client to relay flag
+    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
+    offset += sizeof(RoutingFlag);
+
+    // session_id = -1
+    std::fill_n(&buf[offset], sizeof(session_id_t), static_cast<uint8_t>(-1));
+    offset += sizeof(session_id_t);
+
+    // thdr (circuit_id = -1 for relay control)
+    TransitHeader thdr{};
+    thdr.circuit_id = static_cast<circuit_id_t>(-1);
+    thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelayHandshakeReq));
+    thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
+    thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    // control_header
+    ControlHeader chdr{};
+    chdr.msg_type = ControlMsgType::RELAY_HANDSHAKE_REQ;
+    chdr.flags = 0;
+    chdr.payload_len = static_cast<uint16_t>(sizeof(RelayHandshakeReq));
+    chdr.sequence_id = 0;
+    std::memcpy(buf.data() + offset, &chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    // control body
+    RelayHandshakeReq req{};
+    req.session_id_req = relay.session_id;
+    std::memcpy(buf.data() + offset, &req, sizeof(RelayHandshakeReq));
+
+    return buf;
+}
+
+
+std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay){
+    // packet: RoutingFlag + session_id + TransitHeader + ControlHeader + RelayListReq
+    std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayListReq));
+    size_t offset = 0;
+
+    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
+    offset += sizeof(RoutingFlag);
+
+    for(size_t i = 0; i < sizeof(session_id_t); i++){
+        buf[offset + i] = static_cast<uint8_t>((relay.session_id >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
+    }
+    offset += sizeof(session_id_t);
+
+    TransitHeader thdr{};
+    thdr.circuit_id = static_cast<circuit_id_t>(-1);
+    thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelayListReq));
+    thdr.flags = 1;
+    thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader chdr{};
+    chdr.msg_type = ControlMsgType::RELAY_DISCOVERY_REQ;
+    chdr.flags = 0;
+    chdr.payload_len = static_cast<uint16_t>(sizeof(RelayListReq));
+    chdr.sequence_id = 0;
+    std::memcpy(buf.data() + offset, &chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    RelayListReq req{};
+    req.relays_requested = MAX_RELAY_LIST_SZ;
+    std::memcpy(buf.data() + offset, &req, sizeof(RelayListReq));
+
+    return buf;
+}
+
+
+asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& relay,
+                                                                 std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
+                                                                 std::shared_ptr<RelaysInfoGlb> relays_info_glb){
+    std::vector<RelayInfo> result_relays;
+    if(relay.session_id == static_cast<session_id_t>(-1) || !udp_sockv4 || !relays_info_glb){
+        co_return result_relays;
+    }
+
+    auto buf = make_request_relay_list_packet(relay);
+
+    auto timeout = udp_comms_config::start_timeout;
+    auto executor = co_await asio::this_coro::executor;
+
+    for(size_t attempt = 1; attempt <= udp_comms_config::max_attempts; attempt++){
+        try{
+            co_await udp_sockv4->async_send_to(asio::buffer(buf), relay.endpoint, asio::use_awaitable);
+
+            asio::steady_timer timer(executor, timeout);
+
+            using namespace boost::asio::experimental::awaitable_operators;
+            auto wait_res = co_await (
+                async_wait_for_response(relay.session_id, asio::use_awaitable, relays_info_glb)
+                ||
+                timer.async_wait(asio::use_awaitable)
+            );
+
+            if(wait_res.index() == 0){
+                std::vector<uint8_t> payload = std::get<0>(wait_res);
+                if(payload.size() >= sizeof(RelayListRes)){
+                    RelayListRes res{};
+                    std::memcpy(&res, payload.data(), sizeof(RelayListRes));
+                    size_t count = std::min<size_t>(res.count, MAX_RELAY_LIST_SZ);
+                    for(size_t i = 0; i < count; i++){
+                        const auto& rec = res.relays[i];
+                        if(rec.ipv4 == 0)
+                            continue;
+                        RelayInfo rinfo;
+                        rinfo.session_id = static_cast<session_id_t>(-1);
+                        rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(ntohl(rec.ipv4)), ntohs(rec.port));
+                        result_relays.push_back(rinfo);
+                    }
+                }
+                co_return result_relays;
+            }
+
+            auto& mut = relays_info_glb->registry_mutex_;
+            std::lock_guard<std::mutex> lock(mut);
+            relays_info_glb->pending_requests_.erase(relay.session_id);
+        }
+        catch(...){
+            // retry on exception
+        }
+        timeout *= 2;
+    }
+
+    co_return result_relays;
 }
 
 
@@ -314,19 +452,23 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
 
     switch(packet->route_flag){
         case RoutingFlag::CLIENT_TO_RELAY: {
-            relay_->process_packet_from_client(std::move(packet));
+            if(relay_)
+                relay_->process_packet_from_client(std::move(packet), endpoint);
             return;
         }
         case RoutingFlag::EXIT_TO_RELAY: {
-            relay_->process_packet_from_exit(std::move(packet));
+            if(relay_)
+                relay_->process_packet_from_exit(std::move(packet));
             return;
         }
         case RoutingFlag::RELAY_TO_CLIENT: {
-            client_->process_incoming_packet(std::move(packet));
+            if(client_)
+                client_->process_incoming_packet(std::move(packet));
             return;
         }
         case RoutingFlag::RELAY_TO_EXIT: {
-            exit_->process_incoming_packet(std::move(packet));
+            if(exit_)
+                exit_->process_incoming_packet(std::move(packet));
             return;
         }
         default: {
