@@ -60,10 +60,13 @@ Client::Client(asio::io_context& ioc,
     udp_socketv6_(std::move(udp_socketv6)),
     running_(false),
     known_relays_(std::move(known_relays)),
-    raw_packet_pool_(16384, "client_logger"),
+    default_ci_(nullptr),
+    raw_packet_pool_(Settings::ARENA_SLOTS, "client_logger"),
     utun_stream_(ioc_),
     utun_("client_logger"){
     logger_ = quill::Frontend::get_logger("client_logger");
+    default_vpn_v4_ = RandomGen::gen_address_v4();
+    default_vpn_v6_ = RandomGen::gen_address_v6();
 }
 
 
@@ -74,24 +77,32 @@ Client::~Client(){
 }
 
 
-[[nodiscard]] bool Client::start(){
+[[nodiscard]] asio::awaitable<bool> Client::start(){
     if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
         LOG_ERROR(logger_, "Called start() more than once.");
-        return false;
+        co_return false;
     }
 
-    // todo: connect_control_server(), connect_peers(), utun_.add_del_route() etc;
-    if(!utun_.add_del_route(true,
-                            asio::ip::make_address("8.8.8.8"),
-                            asio::ip::make_address("255.255.255.255"),
-                            asio::ip::make_address("192.168.0.1"))){
-        LOG_ERROR(logger_, "Failed to add (relay ip) to utun routes.");
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
+        const asio::ip::address prefix_v4 = asio::ip::make_address("255.255.255.255");
+        for(auto& rinfo: known_relays_->usable_relays){
+            if(!utun_.add_del_route(true, rinfo.endpoint.address(), prefix_v4)){
+                LOG_ERROR(logger_, "Failed to add {} to utun routes.", rinfo.endpoint.address().to_string());
+                co_return false;
+            }
+            LOG_INFO(logger_, "Added {} to utun routes.", rinfo.endpoint.address().to_string());
+        }
     }
 
-    if(!utun_.start(true)){
+    if(!co_await make_new_circuit(std::nullopt)){
+        LOG_ERROR(logger_, "Failed to make default circuit.");
+        co_return false;
+    }
+
+    if(!utun_.start(true, default_vpn_v4_, default_vpn_v6_)){
         LOG_ERROR(logger_, "Failed to start utun.");
-        return false;
+        co_return false;
     }
     LOG_INFO(logger_, "[UTUN] Started successfully.");
 
@@ -100,13 +111,13 @@ Client::~Client(){
     boost::system::error_code ec;
     if(utun_stream_.assign(utun_sockfd_, ec)){
         LOG_ERROR(logger_, "Failed to convert utun_sockfd_ to asio stream_descriptor.");
-        return false;
+        co_return false;
     }
 
     start_listening_utun();
 
     LOG_INFO(logger_, "Started successfully.");
-    return true;
+    co_return true;
 }
 
 
@@ -117,7 +128,7 @@ inline void Client::start_listening_utun(){
 
 
 void Client::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
-    // TODO: check if this reads whole packet. if it doesn't, how do we make it read the whole packet?
+    // todo: check if this reads whole packet. if it doesn't, how do we make it read the whole packet?
     utun_stream_.async_read_some(
         asio::buffer(raw_packet->payload),
         [me=shared_from_this(), rp = std::move(raw_packet)](const boost::system::error_code& ec, std::size_t bytes_xfer) mutable{
@@ -293,20 +304,15 @@ std::shared_ptr<CircuitInfo> Client::track_new_nt(NetworkTuple& nt, ArenaSlot<ut
 
 
 void Client::compute_new_nt_ci(std::shared_ptr<OngoingCircuitCalcInfo> cci){
-    // TODO: actual circuit computation
-    sequence_id_t start_seq = 2385829;
+    // default circuit, udpate once it proves it's network-heavy
     auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
-        .circuit_id      = 1232938,
-        .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(2385829),
-        .relays          = std::vector<std::shared_ptr<RelayInfo>>{
-            std::make_shared<RelayInfo>(RelayInfo{
-                .session_id = 12321344,
-                .endpoint   = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 6000),
-            })
-        },
-        .reorder_buffer = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, start_seq) // fixme: remove 2048
+        .circuit_id       = default_ci_->circuit_id,
+        .sequence_id_ptr  = default_ci_->sequence_id_ptr,
+        .relays           = default_ci_->relays,
+        .reorder_buffer   = default_ci_->reorder_buffer,
+        .nt               = cci->nt,
+        .activity_counter = std::make_shared<Statistics<10>>(),
     });
-    sid_ci_umap_.put(12321344, final_ci);
 
 
     // After computing circuit:
@@ -387,8 +393,16 @@ void Client::stop(){
 }
 
 
-asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
-    LOG_INFO(logger_, "Started making new circuit, requested by: {}", nt.to_string());
+asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
+    if(nt.has_value())
+        LOG_INFO(logger_, "Starting making new circuit, requested by: {}", nt.value().to_string());
+    else{
+        if(default_ci_ != nullptr){
+            LOG_ERROR(logger_, "Requested to make default circuit more than once.");
+            co_return false;
+        }
+        LOG_INFO(logger_, "Starting making default circuit.");
+    }
 
     std::vector<std::shared_ptr<RelayInfo>> relay_list;
     if(known_relays_){
@@ -400,7 +414,7 @@ asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
 
     if(relay_list.size() < Settings::DEFAULT_NUM_ENTRY_RELAYS){
         LOG_INFO(logger_, "Couldn't make new circuit, not enough relays.");
-        co_return;
+        co_return false;
     }
 
     circuit_id_t assigned_cid = RandomGen::gen_circuit_id();
@@ -454,17 +468,17 @@ asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
                  added_relays,
                  Settings::DEFAULT_NUM_ENTRY_RELAYS
         );
-        co_return;
+        co_return false;
     }
     LOG_INFO(logger_, "{} relays ready to connect to exit.", added_relays);
 
 
-    // end-to-end circuit creation with exit through one relay
+    // full circuit creation with exit through one relay
     sequence_id_t our_start_seq = RandomGen::gen_seq_id();
     sequence_id_t exit_start_seq = 0;
     auto txn_id = RandomGen::gen_txn_id();
     auto primary_relay = selected_relays[0];
-    auto create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays);
+    auto create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays, default_vpn_v4_);
     auto sock = (primary_relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
     auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_);
@@ -474,7 +488,7 @@ asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
         // process_incoming_packet already parsed packet
         if(response_vec.size() < sizeof(RelaySetupExitRes)){
             LOG_INFO(logger_, "Couldn't connect to exit : received response size too small.");
-            co_return;
+            co_return false;
         }
 
         ExitHandshakeRes response{};
@@ -482,12 +496,12 @@ asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
 
         if(response.status_code){
             LOG_INFO(logger_, "Couldn't connect to exit : status : {}", response.status_code);
-            co_return;
+            co_return false;
         }
 
         if(response.confirmed_cid != assigned_cid){
             LOG_INFO(logger_, "Couldn't connect to exit : received unexpected confirmed_cid.");
-            co_return;
+            co_return false;
         }
 
         exit_start_seq = response.start_seq_exit;
@@ -495,14 +509,16 @@ asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
     }
     else{
         LOG_ERROR(logger_, "Couldn't connect to exit : {}", std::get<Node::CommError>(res).what());
-        co_return;
+        co_return false;
     }
 
     auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
-        .circuit_id      = assigned_cid,
-        .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(exit_start_seq),
-        .relays          = selected_relays,
-        .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, exit_start_seq)
+        .circuit_id       = assigned_cid,
+        .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(exit_start_seq),
+        .relays           = selected_relays,
+        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, exit_start_seq),
+        .nt               = nt,
+        .activity_counter = std::make_shared<Statistics<10>>()
     });
 
     for(const auto& rinfo: selected_relays){
@@ -512,8 +528,15 @@ asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
     // update nt_ci_umap_. new packets should use the new ci from now
     // for packets which are being processed (using the old one), the continue to use the old one
     // NOTE: if a packet using new circuit goes in faster than ones with the old circuit, god (or the app) handles it
-    nt_ci_umap_.put(nt, final_ci);
-    co_return;
+    if(nt.has_value()){
+        nt_ci_umap_.put(nt.value(), final_ci);
+        LOG_INFO(logger_, "New circuit successfully setup.");
+    }
+    else{
+        default_ci_ = final_ci;
+        LOG_INFO(logger_, "Default circuit successfully setup.");
+    }
+    co_return true;
 }
 
 
@@ -631,7 +654,7 @@ void Client::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet)
         utun_stream_,
         asio::buffer(packet->payload.data(), packet->payload_bytes),
         [me = shared_from_this(), pkt = std::move(packet), seq_id]
-    (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
+        (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
             if(ec){
                 LOG_ERROR(me->logger_, "Failed to write seq_id {} to utun: {}", seq_id, ec.message());
             }
@@ -685,7 +708,8 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
                                                         const circuit_id_t cid,
                                                         txn_id_t txn_id,
                                                         sequence_id_t our_start_seq,
-                                                        std::vector<std::shared_ptr<RelayInfo>> selected_relays){
+                                                        const std::vector<std::shared_ptr<RelayInfo>>& selected_relays,
+                                                        const asio::ip::address_v4& our_address_v4){
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeReq));
     size_t offset = 0;
 
@@ -732,6 +756,8 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
     req.requested_cid = cid;
     req.start_seq_client = our_start_seq;
     req.relay_list = relay_list;
+    const auto bytes = our_address_v4.to_bytes();
+    std::memcpy(&req.ipv4, bytes.data(), sizeof(req.ipv4));
     std::memcpy(buf.data() + offset, &req, sizeof(ExitHandshakeReq));
 
     return buf;

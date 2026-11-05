@@ -1,6 +1,6 @@
 #pragma once
+#include "src/network/packets/cell.hpp"
 
-#include <cstdint>
 #include <type_traits>
 
 
@@ -207,13 +207,15 @@ static_assert(std::is_trivially_copyable_v<RelayList>, "RelayList not memcpy saf
 
 
 struct ExitHandshakeReq{
+    uint32_t ipv4;                  // 4 bytes: private ip requested by client
+    uint8_t _reserved_[4];          // 4 bytes: padding
     circuit_id_t requested_cid;     // 8 bytes: circuit id requested by client
     sequence_id_t start_seq_client; // 8 bytes: start sequence id used by the client
     RelayList relay_list;           // 48 bytes: relay list
     // todo: encryption
 };
 
-static_assert(sizeof(ExitHandshakeReq) == 64, "ExitCircuitCreateReq layout broken");
+static_assert(sizeof(ExitHandshakeReq) == 72, "ExitCircuitCreateReq layout broken");
 static_assert(std::is_trivially_copyable_v<ExitHandshakeReq>, "ExitCircuitCreateReq not memcpy safe");
 
 
@@ -223,7 +225,6 @@ struct ExitHandshakeRes{
     uint32_t rob_window_size;     // 4 bytes: window capacity
     uint8_t status_code;          // 1 byte:  0 = ok, 1 = error
     uint8_t _reserved_[3];        // 3 bytes: padding
-    // todo: GIVE CLIENT VIRTUAL IP
     // todo: encryption
 };
 

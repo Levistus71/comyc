@@ -16,7 +16,6 @@
 #include <boost/asio.hpp>
 
 
-
 #if !defined(__cpp_lib_atomic_shared_ptr) || __cpp_lib_atomic_shared_ptr < 201711L
 #error "C++ library toolchain doesn't support std::atomic<std::shared_ptr>"
 #endif
@@ -249,7 +248,7 @@ struct NetworkTuple{
 
     std::string to_string() const{
         return src_addr.to_string() + ":" + std::to_string(src_port) + " -> " +
-           dest_addr.to_string() + ":" + std::to_string(dest_port);
+               dest_addr.to_string() + ":" + std::to_string(dest_port);
     }
 };
 
@@ -280,21 +279,24 @@ struct RelayInfo{
         return endpoint == other.endpoint;
     }
 
+
     std::string to_string(){
         std::stringstream ss;
         ss << "RelayInfo{";
 
-        if (session_id == -1) {
+        if(session_id == -1){
             ss << "status: not connected";
-        } else {
+        }
+        else{
             ss << "session_id: " << session_id << ", status: connected";
         }
 
         ss << ", endpoint: " << endpoint.address().to_string()
-           << ":" << endpoint.port() << "}";
+            << ":" << endpoint.port() << "}";
 
         return ss.str();
     }
+
 
     bool is_connected() const{
         return session_id != static_cast<session_id_t>(-1);
@@ -349,6 +351,7 @@ public:
         return total;
     }
 
+
     std::atomic<bool> new_circuit_queued{false};
     std::atomic<bool> dont_create_new_circuit{false};
 
@@ -374,9 +377,10 @@ struct CircuitInfo{
 
     // sh_ce
     std::shared_ptr<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>> reorder_buffer;
-    NetworkTuple nt;
+    std::optional<NetworkTuple> nt; // nullopt -> default circuit
 
     std::shared_ptr<Statistics<10>> activity_counter;
+
 
     void touch(const std::shared_ptr<Client>& client_ptr) const;
 };
@@ -392,27 +396,48 @@ struct RelaysInfoGlb{
 };
 
 
-class RandomGen {
+class RandomGen{
 public:
-    static txn_id_t gen_txn_id() {
+    static txn_id_t gen_txn_id(){
         std::uniform_int_distribution<txn_id_t> dist;
         return dist(gen_);
     }
 
-    static sequence_id_t gen_seq_id() {
+
+    static sequence_id_t gen_seq_id(){
         std::uniform_int_distribution<sequence_id_t> dist;
         return dist(gen_);
     }
 
-    static session_id_t gen_session_id() {
+
+    static session_id_t gen_session_id(){
         std::uniform_int_distribution<session_id_t> dist;
         return dist(gen_);
     }
 
-    static circuit_id_t gen_circuit_id() {
+
+    static circuit_id_t gen_circuit_id(){
         std::uniform_int_distribution<circuit_id_t> dist;
         return dist(gen_);
     }
+
+
+    static asio::ip::address_v4 gen_address_v4(){
+        std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
+        const uint32_t random_ip_int = dist(gen_);
+        return asio::ip::address_v4(random_ip_int);
+    }
+
+
+    static asio::ip::address_v6 gen_address_v6(){
+        std::uniform_int_distribution<unsigned short> dist(0, 255);
+        asio::ip::address_v6::bytes_type bytes;
+        for(auto& byte: bytes){
+            byte = static_cast<unsigned char>(dist(gen_));
+        }
+        return asio::ip::address_v6(bytes);
+    }
+
 
     inline thread_local static std::mt19937 gen_{std::random_device{}()};
 };

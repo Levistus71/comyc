@@ -1,3 +1,6 @@
+#include "node.hpp"
+#include "node.hpp"
+#include "node.hpp"
 #include "src/node/node.hpp"
 #include "src/network/comms/control.hpp"
 
@@ -15,17 +18,15 @@
 Node::Node(asio::io_context& ioc, const NodeRole role):
     role_(role),
     ioc_(ioc),
-    listening_endpoint_(asio::ip::udp::endpoint(asio::ip::udp::v4(), 12345)),
-    incoming_cell_pool_(16834, "node_logger"){
+    incoming_cell_pool_(Settings::ARENA_POOL_SIZE, "node_logger"){
     udp_socketv4_ = std::make_shared<asio::ip::udp::socket>(ioc_);
     udp_socketv6_ = std::make_shared<asio::ip::udp::socket>(ioc_);
     logger_ = quill::Frontend::get_logger("node_logger");
 
-    bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 8008);
+    bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address(Settings::BOOTSTRAP_IP), Settings::BOOTSTRAP_PORT);
 
     sender_endpoint_ = std::make_shared<asio::ip::udp::endpoint>();
 
-    // todo: start client, start relay, start exit? based on the role.
     const bool is_client = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::CLIENT);
     const bool is_relay = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::RELAY);
     const bool is_exit = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::EXIT);
@@ -83,7 +84,7 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
     }
 
     if(client_ != nullptr){
-        if(!client_->start()){
+        if(!co_await client_->start()){
             LOG_ERROR(logger_, "Client not started.");
             co_return false;
         }
@@ -153,7 +154,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
         RelayInfo current = stk.top();
         stk.pop();
 
-        // todo: only ipv4 for now
+        // fixme: only ipv4 for now
         if(current.endpoint.protocol() == asio::ip::udp::v6())
             continue;
 

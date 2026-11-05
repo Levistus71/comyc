@@ -71,7 +71,9 @@ public:
     Utun& operator=(const Utun&) = delete;
 
 
-    [[nodiscard]] bool start(bool hijack_system_traffic);
+    [[nodiscard]] bool start(bool hijack_system_traffic,
+                             const asio::ip::address_v4& vpn_assigned_v4,
+                             const asio::ip::address_v6& vpn_assigned_v6);
 
 
     void stop();
@@ -88,8 +90,7 @@ public:
 
     [[nodiscard]] bool add_del_route(bool add,
                                      const asio::ip::address& dest,
-                                     const asio::ip::address& netmaskv4_prefixv6,
-                                     const asio::ip::address& gateway);
+                                     const asio::ip::address& netmaskv4_prefixv6);
 
 private:
     int utun_fd_ = -1;
@@ -102,6 +103,9 @@ private:
     asio::ip::address_v4 dummy_gateway_ipv4_;
     asio::ip::address_v6 vpn_assigned_ipv6_;
     asio::ip::address_v6 dummy_gateway_ipv6_;
+
+    asio::ip::address default_gateway_ipv4_;
+    asio::ip::address default_gateway_ipv6_;
 
     std::mutex route_update_mutex_;                 // locks are fine, route updates happen occasionally (not frequent).
     std::unordered_set<RouteConfig> active_routes_; // accessed only in start(), stop(), ~Utun() and modify_route(). all use lock.
@@ -143,6 +147,11 @@ private:
                                               const asio::ip::address& dest,
                                               const asio::ip::address& netmaskv4_prefixv6,
                                               const asio::ip::address& gateway);
+
+
+    static std::optional<asio::ip::address> get_default_gateway_v4();
+
+    static std::optional<asio::ip::address_v6> get_default_gateway_v6();
 };
 
 

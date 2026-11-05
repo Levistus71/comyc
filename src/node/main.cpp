@@ -78,7 +78,7 @@ int main(){
     asio::io_context ioc;
     auto work_guard = asio::make_work_guard(ioc);
 
-    // fixme: role should be decided dynamically
+    // todo: role should be decided dynamically (cli)
     constexpr auto role = NodeRole::CLIENT_RELAY;
     const auto node = std::make_shared<Node>(ioc, role);
 

@@ -41,6 +41,7 @@ public:
 
     template<typename Callback>
     void try_drain(Callback&& handler){
+        // todo: actual drain logic (waiting)
         while(buffer_[head_ % capacity_].has_value()){
             size_t index = head_ % capacity_;
             auto item = std::move(*buffer_[index]);

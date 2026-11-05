@@ -13,7 +13,11 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <ifaddrs.h>
+#include <sys/sysctl.h>
 
+#include <iostream>
+#include <vector>
+#include <optional>
 #include <string>
 #include <boost/asio.hpp>
 #include <quill/LogMacros.h>
@@ -25,6 +29,8 @@ Utun::Utun(const std::string& logger_name){
     dummy_gateway_ipv4_ = asio::ip::make_address_v4("10.8.0.1");
     vpn_assigned_ipv6_ = asio::ip::make_address_v6("fd00::2");
     dummy_gateway_ipv6_ = asio::ip::make_address_v6("fd00::1");
+    default_gateway_ipv4_ = asio::ip::make_address_v4("192.168.0.1");
+    default_gateway_ipv6_ = asio::ip::make_address_v6("fe80::");
 }
 
 
@@ -80,7 +86,33 @@ void Utun::stop(){
 }
 
 
-[[nodiscard]] bool Utun::start(const bool hijack_system_traffic){
+[[nodiscard]] bool Utun::start(const bool hijack_system_traffic,
+                               const asio::ip::address_v4& vpn_assigned_v4,
+                               const asio::ip::address_v6& vpn_assigned_v6){
+    vpn_assigned_ipv4_ = vpn_assigned_v4;
+    vpn_assigned_ipv6_ = vpn_assigned_v6;
+
+    {
+        auto maybe_gateway = get_default_gateway_v4();
+        if(maybe_gateway.has_value()){
+            default_gateway_ipv4_ = maybe_gateway.value();
+            LOG_INFO(logger_, "[UTUN] default gateway ipv4 found: {}", default_gateway_ipv4_.to_string());
+        }
+        else
+            LOG_INFO(logger_, "[UTUN] default gateway ipv4 found, presuming {}", default_gateway_ipv4_.to_string());
+    }
+    {
+        auto maybe_gateway = get_default_gateway_v6();
+        if(maybe_gateway.has_value()){
+            default_gateway_ipv6_ = maybe_gateway.value();
+            LOG_INFO(logger_, "[UTUN] default gateway ipv6 found: {}", default_gateway_ipv6_.to_string());
+        }
+        else
+            LOG_INFO(logger_, "[UTUN] default gateway ipv4 found, presuming {}", default_gateway_ipv6_.to_string());
+    }
+
+
+
     /*
         val.compare_exchange_strong(&expected, desired)
         if(val==expected){
@@ -568,15 +600,135 @@ int Utun::get_fd() const{
 //     return true;
 // }
 
+// todo: AI, check
+std::optional<asio::ip::address> Utun::get_default_gateway_v4(){
+    int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP, 0};
+    size_t len = 0;
+
+    if(sysctl(mib, 6, nullptr, &len, nullptr, 0) < 0){
+        return std::nullopt;
+    }
+
+    std::vector<char> buffer(len);
+    if(sysctl(mib, 6, buffer.data(), &len, nullptr, 0) < 0){
+        return std::nullopt;
+    }
+
+    char* ptr = buffer.data();
+    char* end = buffer.data() + len;
+
+    while(ptr < end){
+        auto* rtm = reinterpret_cast<struct rt_msghdr*>(ptr);
+        if(rtm->rtm_version != RTM_VERSION){
+            ptr += rtm->rtm_msglen;
+            continue;
+        }
+
+        auto* sa = reinterpret_cast<struct sockaddr*>(rtm + 1);
+        sockaddr* dst = nullptr;
+        sockaddr* gw = nullptr;
+
+        for(int i = 0; i < RTAX_MAX; i++){
+            if(rtm->rtm_addrs & (1 << i)){
+                if(i == RTAX_DST)
+                    dst = sa;
+                if(i == RTAX_GATEWAY)
+                    gw = sa;
+
+                sa = reinterpret_cast<sockaddr*>(
+                    reinterpret_cast<char*>(sa) +
+                    (sa->sa_len ? ((sa->sa_len + sizeof(uint32_t) - 1) & ~(sizeof(uint32_t) - 1)) : sizeof(uint32_t))
+                );
+            }
+        }
+
+        if(dst && gw && dst->sa_family == AF_INET && gw->sa_family == AF_INET){
+            auto* dst_in = reinterpret_cast<struct sockaddr_in*>(dst);
+            auto* gw_in = reinterpret_cast<struct sockaddr_in*>(gw);
+
+            if(dst_in->sin_addr.s_addr == INADDR_ANY && (rtm->rtm_flags & RTF_GATEWAY)){
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(gw_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+                return asio::ip::make_address_v4(ip_str);
+            }
+        }
+
+        ptr += rtm->rtm_msglen;
+    }
+
+    return std::nullopt;
+}
+
+// todo: AI, check
+std::optional<asio::ip::address_v6> Utun::get_default_gateway_v6(){
+    int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET6, NET_RT_DUMP, 0};
+    size_t len = 0;
+
+    if(sysctl(mib, 6, nullptr, &len, nullptr, 0) < 0){
+        return std::nullopt;
+    }
+
+    std::vector<char> buffer(len);
+    if(sysctl(mib, 6, buffer.data(), &len, nullptr, 0) < 0){
+        return std::nullopt;
+    }
+
+    char* ptr = buffer.data();
+    char* end = buffer.data() + len;
+
+    while(ptr < end){
+        auto* rtm = reinterpret_cast<struct rt_msghdr*>(ptr);
+        if(rtm->rtm_version != RTM_VERSION){
+            ptr += rtm->rtm_msglen;
+            continue;
+        }
+
+        auto* sa = reinterpret_cast<struct sockaddr*>(rtm + 1);
+        sockaddr* dst = nullptr;
+        sockaddr* gw = nullptr;
+
+        for(int i = 0; i < RTAX_MAX; i++){
+            if(rtm->rtm_addrs & (1 << i)){
+                if(i == RTAX_DST)
+                    dst = sa;
+                if(i == RTAX_GATEWAY)
+                    gw = sa;
+
+                sa = reinterpret_cast<sockaddr*>(
+                    reinterpret_cast<char*>(sa) +
+                    (sa->sa_len ? ((sa->sa_len + sizeof(uint32_t) - 1) & ~(sizeof(uint32_t) - 1)) : sizeof(uint32_t))
+                );
+            }
+        }
+
+        if(dst && gw && dst->sa_family == AF_INET6 && gw->sa_family == AF_INET6){
+            auto* dst_in6 = reinterpret_cast<struct sockaddr_in6*>(dst);
+            auto* gw_in6 = reinterpret_cast<struct sockaddr_in6*>(gw);
+
+            if(IN6_IS_ADDR_UNSPECIFIED(&dst_in6->sin6_addr) && (rtm->rtm_flags & RTF_GATEWAY)){
+                char ip_str[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, &(gw_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+
+                auto addr = asio::ip::make_address_v6(ip_str);
+                if(gw_in6->sin6_scope_id != 0){
+                    addr.scope_id(gw_in6->sin6_scope_id);
+                }
+                return addr;
+            }
+        }
+
+        ptr += rtm->rtm_msglen;
+    }
+
+    return std::nullopt;
+}
+
 
 [[nodiscard]] bool Utun::add_del_route(const bool add,
                                        const asio::ip::address& dest,
-                                       const asio::ip::address& netmaskv4_prefixv6,
-                                       const asio::ip::address& gateway){
-    if(dest.is_v4() != gateway.is_v4()){
-        LOG_ERROR(logger_, "[UTUN] destination and gateway ip protocols don't match.");
-        return false;
-    }
+                                       const asio::ip::address& netmaskv4_prefixv6){
+
+    const auto gateway = dest.is_v4() ? default_gateway_ipv4_ : default_gateway_ipv6_;
 
     std::lock_guard<std::mutex> lock(route_update_mutex_);
 
@@ -600,6 +752,12 @@ int Utun::get_fd() const{
 
         if(updated){
             active_routes_.insert(route);
+            LOG_INFO(logger_, "[UTUN] Updated route [{}]: {}/{}, gateway: {}",
+                add ? "add" : "delete",
+                dest.to_string(),
+                netmaskv4_prefixv6.to_string(),
+                gateway.to_string()
+            );
             return true;
         }
         return false;
@@ -616,6 +774,12 @@ int Utun::get_fd() const{
 
         if(updated){
             active_routes_.erase(route);
+            LOG_INFO(logger_, "[UTUN] Updated route [{}]: {}/{}, gateway: {}",
+                add ? "add" : "delete",
+                dest.to_string(),
+                netmaskv4_prefixv6.to_string(),
+                gateway.to_string()
+            );
             return true;
         }
         return false;

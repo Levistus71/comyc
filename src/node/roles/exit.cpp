@@ -267,6 +267,11 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 cid_ci_umap_.put(cid, ci);
             }
 
+            //todo: update nt_ci_umap_ (assign virtual ip to client, use that for nt_ci)
+            {
+
+            }
+
             // build EXIt to send back through the relay
             // RoutingFlag::EXIT_TO_RELAY + TransitHeader + ControlHeader + ExitCircuitCreateRes
             auto resp_packet = make_exit_handshake_resp_packet(chdr, cid, our_initial_seq, Settings::REORDER_BUFFER_SIZE);

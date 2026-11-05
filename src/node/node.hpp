@@ -130,6 +130,17 @@ public:
                                                                     std::shared_ptr<RelaysInfoGlb> relays_info_glb);
 
 
+    struct Settings{
+        static constexpr uint64_t ARENA_POOL_SIZE = 16834;
+
+        // todo: change this
+        static constexpr std::string BOOTSTRAP_IP = "8.8.8.8";
+        static constexpr int BOOTSTRAP_PORT = 6969;
+
+
+    };
+
+
     /*
         we need to listen for incoming packets and route it to either client or relay
 
@@ -169,7 +180,6 @@ private:
     std::shared_ptr<asio::ip::udp::socket> udp_socketv4_;
     std::shared_ptr<asio::ip::udp::socket> udp_socketv6_;
 
-    asio::ip::udp::endpoint listening_endpoint_;
     std::shared_ptr<asio::ip::udp::endpoint> sender_endpoint_;
 
     ArenaAllocator<IncomingCell> incoming_cell_pool_;

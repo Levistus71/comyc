@@ -78,7 +78,7 @@ public:
     Client& operator=(const Client& other) = delete;
 
 
-    [[nodiscard]] bool start();
+    [[nodiscard]] asio::awaitable<bool> start();
 
 
     void stop();
@@ -87,7 +87,8 @@ public:
     void process_incoming_packet(ArenaSlot<IncomingCell> packet);
 
 
-    asio::awaitable<void> make_new_circuit(NetworkTuple nt);
+    //
+    asio::awaitable<bool> make_new_circuit(std::optional<NetworkTuple> nt = std::nullopt);
 
 
     struct Settings{
@@ -95,6 +96,8 @@ public:
         static constexpr uint64_t DEFAULT_NUM_ENTRY_RELAYS = 2;
 
         static_assert(DEFAULT_NUM_ENTRY_RELAYS<MAX_RELAYS_PER_CIRCUIT, "Default number of entry relays too large.");
+
+        static constexpr uint64_t ARENA_SLOTS = 16384;
     };
 
 private:
@@ -105,6 +108,9 @@ private:
     std::atomic<bool> running_;
 
     std::shared_ptr<RelaysInfoGlb> known_relays_;
+    std::shared_ptr<CircuitInfo> default_ci_;
+    asio::ip::address_v4 default_vpn_v4_;
+    asio::ip::address_v6 default_vpn_v6_;
 
     ArenaAllocator<utun::RawPacket> raw_packet_pool_;
 
@@ -151,7 +157,8 @@ private:
                                                            circuit_id_t cid,
                                                            txn_id_t txn_id,
                                                            sequence_id_t our_start_seq,
-                                                           std::vector<std::shared_ptr<RelayInfo>> selected_relays);
+                                                           const std::vector<std::shared_ptr<RelayInfo>>& selected_relays,
+                                                           const asio::ip::address_v4& our_vpn_address);
 
 
     void compute_new_nt_ci(std::shared_ptr<OngoingCircuitCalcInfo> cci);
