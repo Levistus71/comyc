@@ -3,6 +3,7 @@
 #include <type_traits>
 #include <variant>
 #include <array>
+#include <cstddef>
 
 
 enum class PayloadTier : uint8_t {
