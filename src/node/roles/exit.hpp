@@ -76,7 +76,12 @@ public:
     void stop();
 
 
-    void process_incoming_packet(ArenaSlot<IncomingCell> packet);
+    void process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint sender_endpoint);
+
+
+    struct Settings{
+        static constexpr uint64_t REORDER_BUFFER_SIZE = 2048;
+    };
 
 private:
     asio::io_context& ioc_;
@@ -118,7 +123,16 @@ private:
     std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);
 
 
-    [[nodiscard]] bool parse_incoming_packet(ArenaSlot<IncomingCell>& packet);
+    [[nodiscard]] static bool parse_thdr_incoming_packet(const ArenaSlot<IncomingCell>& packet);
+
+
+    void handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio::ip::udp::endpoint& relay_endpoint);
+
+
+    static std::vector<uint8_t> make_exit_handshake_resp_packet(const ControlHeader& chdr,
+                                                                circuit_id_t cid,
+                                                                sequence_id_t seq_id,
+                                                                uint64_t reorder_buffer_size);
 
 
     void insert_into_rob(ArenaSlot<IncomingCell> packet);

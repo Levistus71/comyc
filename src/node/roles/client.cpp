@@ -16,10 +16,39 @@
 #include <vector>
 
 #include <boost/asio.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 
 #include <quill/LogMacros.h>
 
 namespace asio = boost::asio;
+
+
+void CircuitInfo::touch(const std::shared_ptr<Client>& client_ptr) const{
+    if(!client_ptr || !activity_counter)
+        return;
+
+    activity_counter->record_use();
+
+    if(activity_counter->dont_create_new_circuit.load(std::memory_order_acquire))
+        return;
+
+    if(activity_counter->get_rate_in_window() > Client::Settings::HIGH_USAGE_THRESHOLD){
+        bool expected = false;
+        if(activity_counter->new_circuit_queued.compare_exchange_strong(expected, true, std::memory_order_acq_rel)){
+            activity_counter->dont_create_new_circuit.store(true, std::memory_order_release);
+
+            auto net_type = this->nt;
+
+            asio::co_spawn(
+                client_ptr->ioc_,
+                [client_keep_alive = client_ptr, net_type]() -> asio::awaitable<void>{
+                    co_await client_keep_alive->make_new_circuit(net_type);
+                },
+                asio::detached
+            );
+        }
+    }
+}
 
 
 Client::Client(asio::io_context& ioc,
@@ -132,7 +161,7 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
 
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr) [[unlikely]] {
-        ci = make_new_circuit(nt, raw_packet);
+        ci = track_new_nt(nt, raw_packet);
         if(ci == nullptr)
             return;
     }
@@ -207,7 +236,7 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
 
 
 // multithread_care
-std::shared_ptr<CircuitInfo> Client::make_new_circuit(NetworkTuple& nt, ArenaSlot<utun::RawPacket>& raw_packet){
+std::shared_ptr<CircuitInfo> Client::track_new_nt(NetworkTuple& nt, ArenaSlot<utun::RawPacket>& raw_packet){
     // re-check for circuit_info (if poineer finishes everything before running this function)
     {
         const std::shared_ptr<CircuitInfo> check = nt_ci_umap_.get(nt);
@@ -257,13 +286,13 @@ std::shared_ptr<CircuitInfo> Client::make_new_circuit(NetworkTuple& nt, ArenaSlo
     }
 
     asio::post(ioc_, [me = shared_from_this(), ps = pioneer_state]{
-        me->compute_drain_new_circuit(ps);
+        me->compute_new_nt_ci(ps);
     });
     return nullptr;
 }
 
 
-void Client::compute_drain_new_circuit(std::shared_ptr<OngoingCircuitCalcInfo> cci){
+void Client::compute_new_nt_ci(std::shared_ptr<OngoingCircuitCalcInfo> cci){
     // TODO: actual circuit computation
     sequence_id_t start_seq = 2385829;
     auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
@@ -293,7 +322,7 @@ void Client::compute_drain_new_circuit(std::shared_ptr<OngoingCircuitCalcInfo> c
 
     cci->ci = final_ci;
     cci->is_building.store(false, std::memory_order_release);
-    drain_new_circuit_packets(cci);
+    drain_new_nt_packets(cci);
     ci_computing_.erase(cci->nt);
 }
 
@@ -314,12 +343,12 @@ void Client::handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& 
         }
         // call compute_drain_new_circuit
         // NOTE: MUTEX ON HOT PATH. no way to resolve this
-        drain_new_circuit_packets(curr_state);
+        drain_new_nt_packets(curr_state);
     }
 }
 
 
-void Client::drain_new_circuit_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state){
+void Client::drain_new_nt_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state){
     // Note: no other alternative, we should use mutex for this
     // banged my head against the wall for 5 hours
     std::scoped_lock lock(ci_computing_drain_mtx_);
@@ -355,6 +384,136 @@ void Client::stop(){
     utun_.stop();
 
     // TODO: signal relays/exit
+}
+
+
+asio::awaitable<void> Client::make_new_circuit(NetworkTuple nt){
+    LOG_INFO(logger_, "Started making new circuit, requested by: {}", nt.to_string());
+
+    std::vector<std::shared_ptr<RelayInfo>> relay_list;
+    if(known_relays_){
+        std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
+        for(const auto& rinfo: known_relays_->usable_relays){
+            relay_list.push_back(std::make_shared<RelayInfo>(rinfo));
+        }
+    }
+
+    if(relay_list.size() < Settings::DEFAULT_NUM_ENTRY_RELAYS){
+        LOG_INFO(logger_, "Couldn't make new circuit, not enough relays.");
+        co_return;
+    }
+
+    circuit_id_t assigned_cid = RandomGen::gen_circuit_id();
+
+    // todo: proper exit choosing
+    asio::ip::udp::endpoint exit_ep(asio::ip::make_address("8.8.8.8"), 7000);
+
+    // RELAY_SETUP_EXIT_REQ (tell relays about the new exit)
+    std::vector<std::shared_ptr<RelayInfo>> selected_relays;
+    size_t added_relays = 0;
+    for(auto& rinfo: relay_list){
+        if(rinfo->is_connected()){
+            auto txn_id = RandomGen::gen_txn_id();
+            auto setup_packet = make_relay_setup_exit_req_packet(rinfo->session_id, exit_ep, txn_id, assigned_cid);
+            auto sock = (rinfo->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+
+            LOG_INFO(logger_, "Trying to setup exit info with relay : {}", rinfo->to_string());
+
+            auto res = co_await Node::control_send_and_wait_udp(sock, setup_packet, rinfo->endpoint, txn_id, known_relays_);
+
+            if(std::holds_alternative<std::vector<uint8_t>>(res)){
+                auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
+                // process_incoming_packet already parsed packet
+                if(response_vec.size() < sizeof(RelaySetupExitRes)){
+                    LOG_INFO(logger_, "Couldn't setup relay for exit : received response size too small.");
+                    continue;
+                }
+
+                RelaySetupExitRes response{};
+                std::memcpy(&response, response_vec.data(), sizeof(response));
+                if(response.status){
+                    LOG_INFO(logger_, "Couldn't setup relay for exit : status : {}", response.status);
+                    continue;
+                }
+
+                LOG_INFO(logger_, "Setup relay for exit.");
+                added_relays++;
+                selected_relays.push_back(rinfo);
+            }
+            else{
+                LOG_ERROR(logger_, "Couldn't setup relay for exit : {}", std::get<Node::CommError>(res).what());
+                continue;
+            }
+        }
+
+        if(added_relays >= Settings::DEFAULT_NUM_ENTRY_RELAYS)
+            break;
+    }
+    if(added_relays <= Settings::DEFAULT_NUM_ENTRY_RELAYS){
+        LOG_INFO(logger_, "Couldn't make new circuit, num of relays accepted : {} out of required {}",
+                 added_relays,
+                 Settings::DEFAULT_NUM_ENTRY_RELAYS
+        );
+        co_return;
+    }
+    LOG_INFO(logger_, "{} relays ready to connect to exit.", added_relays);
+
+
+    // end-to-end circuit creation with exit through one relay
+    sequence_id_t our_start_seq = RandomGen::gen_seq_id();
+    sequence_id_t exit_start_seq = 0;
+    auto txn_id = RandomGen::gen_txn_id();
+    auto primary_relay = selected_relays[0];
+    auto create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays);
+    auto sock = (primary_relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+
+    auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_);
+
+    if(std::holds_alternative<std::vector<uint8_t>>(res)){
+        auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
+        // process_incoming_packet already parsed packet
+        if(response_vec.size() < sizeof(RelaySetupExitRes)){
+            LOG_INFO(logger_, "Couldn't connect to exit : received response size too small.");
+            co_return;
+        }
+
+        ExitHandshakeRes response{};
+        std::memcpy(&response, response_vec.data(), sizeof(ExitHandshakeRes));
+
+        if(response.status_code){
+            LOG_INFO(logger_, "Couldn't connect to exit : status : {}", response.status_code);
+            co_return;
+        }
+
+        if(response.confirmed_cid != assigned_cid){
+            LOG_INFO(logger_, "Couldn't connect to exit : received unexpected confirmed_cid.");
+            co_return;
+        }
+
+        exit_start_seq = response.start_seq_exit;
+        LOG_INFO(logger_, "Setup relay for exit.");
+    }
+    else{
+        LOG_ERROR(logger_, "Couldn't connect to exit : {}", std::get<Node::CommError>(res).what());
+        co_return;
+    }
+
+    auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
+        .circuit_id      = assigned_cid,
+        .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(exit_start_seq),
+        .relays          = selected_relays,
+        .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, exit_start_seq)
+    });
+
+    for(const auto& rinfo: selected_relays){
+        sid_ci_umap_.put(rinfo->session_id, final_ci);
+    }
+
+    // update nt_ci_umap_. new packets should use the new ci from now
+    // for packets which are being processed (using the old one), the continue to use the old one
+    // NOTE: if a packet using new circuit goes in faster than ones with the old circuit, god (or the app) handles it
+    nt_ci_umap_.put(nt, final_ci);
+    co_return;
 }
 
 
@@ -434,9 +593,8 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) co
 
     std::vector<uint8_t> payload_data(body_ptr, body_ptr + body_len);
 
-    if(chdr.flags == static_cast<uint8_t>(ControlMsgType::RELAY_HANDSHAKE_RESP) && known_relays_){
-        Node::resume_establishing_connection(packet->sid, std::move(payload_data), known_relays_);
-        return;
+    if(known_relays_){
+        Node::resume_control_operation(chdr.txn_id, std::move(payload_data), known_relays_);
     }
 }
 
@@ -479,4 +637,102 @@ void Client::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet)
             }
         }
     );
+}
+
+
+std::vector<uint8_t> Client::make_relay_setup_exit_req_packet(const session_id_t sid,
+                                                              const asio::ip::udp::endpoint& exit_ep,
+                                                              txn_id_t txn_id,
+                                                              circuit_id_t circuit_id){
+    std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelaySetupExitReq));
+    size_t offset = 0;
+
+    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
+    offset += sizeof(RoutingFlag);
+
+    for(size_t i = 0; i < sizeof(session_id_t); i++){
+        buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
+    }
+    offset += sizeof(session_id_t);
+
+    TransitHeader thdr{};
+    thdr.circuit_id = static_cast<circuit_id_t>(-1);
+    thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelaySetupExitReq));
+    thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
+    thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader chdr{};
+    chdr.msg_type = ControlMsgType::RELAY_SETUP_EXIT_REQ;
+    chdr.flags = 0;
+    chdr.payload_len = static_cast<uint16_t>(sizeof(RelaySetupExitReq));
+    chdr.txn_id = txn_id;
+    std::memcpy(buf.data() + offset, &chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    RelaySetupExitReq req{};
+    req.circuit_id = circuit_id;
+    req.exit_ipv4 = htonl(exit_ep.address().to_v4().to_uint());
+    req.exit_port = htons(exit_ep.port());
+    std::memcpy(buf.data() + offset, &req, sizeof(RelaySetupExitReq));
+
+    return buf;
+}
+
+
+std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
+                                                        const circuit_id_t cid,
+                                                        txn_id_t txn_id,
+                                                        sequence_id_t our_start_seq,
+                                                        std::vector<std::shared_ptr<RelayInfo>> selected_relays){
+    std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeReq));
+    size_t offset = 0;
+
+    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
+    offset += sizeof(RoutingFlag);
+
+    for(size_t i = 0; i < sizeof(session_id_t); i++){
+        buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
+    }
+    offset += sizeof(session_id_t);
+
+    TransitHeader thdr{};
+    thdr.circuit_id = cid;
+    thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(ExitHandshakeReq));
+    thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
+    thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader chdr{};
+    chdr.msg_type = ControlMsgType::EXIT_HANDSHAKE_REQ;
+    chdr.flags = 0;
+    chdr.payload_len = static_cast<uint16_t>(sizeof(ExitHandshakeReq));
+    chdr.txn_id = txn_id;
+    std::memcpy(buf.data() + offset, &chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    RelayList relay_list{};
+    uint16_t populated = 0;
+    for(const auto& rinfo: selected_relays){
+        if(populated >= MAX_RELAYS_PER_CIRCUIT)
+            break;
+        if(rinfo->endpoint.address().is_v4()){
+            relay_list.relays[populated].ipv4 = htonl(rinfo->endpoint.address().to_v4().to_uint());
+            relay_list.relays[populated].port = htons(rinfo->endpoint.port());
+            relay_list.relays[populated].nat = 0;
+            relay_list.relays[populated].bandwidth_tier = 0;
+            populated++;
+        }
+    }
+    relay_list.count = populated;
+
+    ExitHandshakeReq req{};
+    req.requested_cid = cid;
+    req.start_seq_client = our_start_seq;
+    req.relay_list = relay_list;
+    std::memcpy(buf.data() + offset, &req, sizeof(ExitHandshakeReq));
+
+    return buf;
 }

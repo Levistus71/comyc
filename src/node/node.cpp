@@ -136,8 +136,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
     if(start_relay.session_id == std::numeric_limits<session_id_t>::max())
         co_return CommError(true, "start_relay unconnected to populate relay list.");
 
-    std::random_device rd;
-    std::mt19937 rng(rd());
+    std::mt19937& rng = RandomGen::gen_;
 
     std::unordered_set<RelayInfo> visited;
     std::stack<RelayInfo> stk;
@@ -209,7 +208,7 @@ bool Node::is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unorde
 }
 
 
-std::vector<uint8_t> Node::make_connection_packet(RelayInfo& relay){
+std::vector<uint8_t> Node::make_connection_packet(RelayInfo& relay, txn_id_t txn_id){
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayHandshakeReq));
 
     size_t offset = 0;
@@ -236,7 +235,7 @@ std::vector<uint8_t> Node::make_connection_packet(RelayInfo& relay){
     chdr.msg_type = ControlMsgType::RELAY_HANDSHAKE_REQ;
     chdr.flags = 0;
     chdr.payload_len = static_cast<uint16_t>(sizeof(RelayHandshakeReq));
-    chdr.sequence_id = 0;
+    chdr.txn_id = txn_id;
     std::memcpy(buf.data() + offset, &chdr, CONTROL_HDR_SZ);
     offset += CONTROL_HDR_SZ;
 
@@ -249,7 +248,7 @@ std::vector<uint8_t> Node::make_connection_packet(RelayInfo& relay){
 }
 
 
-std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay){
+std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay, txn_id_t txn_id){
     // packet: RoutingFlag + session_id + TransitHeader + ControlHeader + RelayListReq
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayListReq));
     size_t offset = 0;
@@ -274,7 +273,7 @@ std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay){
     chdr.msg_type = ControlMsgType::RELAY_DISCOVERY_REQ;
     chdr.flags = 0;
     chdr.payload_len = static_cast<uint16_t>(sizeof(RelayListReq));
-    chdr.sequence_id = 0;
+    chdr.txn_id = txn_id;
     std::memcpy(buf.data() + offset, &chdr, CONTROL_HDR_SZ);
     offset += CONTROL_HDR_SZ;
 
@@ -294,51 +293,31 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
         co_return result_relays;
     }
 
-    auto buf = make_request_relay_list_packet(relay);
+    txn_id_t txn_id = RandomGen::gen_txn_id();
+    auto request_packet = make_request_relay_list_packet(relay, txn_id);
 
     auto timeout = udp_comms_config::start_timeout;
     auto executor = co_await asio::this_coro::executor;
 
-    for(size_t attempt = 1; attempt <= udp_comms_config::max_attempts; attempt++){
-        try{
-            co_await udp_sockv4->async_send_to(asio::buffer(buf), relay.endpoint, asio::use_awaitable);
+    auto response = co_await control_send_and_wait_udp(udp_sockv4, request_packet, relay.endpoint, txn_id, relays_info_glb);
 
-            asio::steady_timer timer(executor, timeout);
-
-            using namespace boost::asio::experimental::awaitable_operators;
-            auto wait_res = co_await (
-                async_wait_for_response(relay.session_id, asio::use_awaitable, relays_info_glb)
-                ||
-                timer.async_wait(asio::use_awaitable)
-            );
-
-            if(wait_res.index() == 0){
-                std::vector<uint8_t> payload = std::get<0>(wait_res);
-                if(payload.size() >= sizeof(RelayListRes)){
-                    RelayListRes res{};
-                    std::memcpy(&res, payload.data(), sizeof(RelayListRes));
-                    size_t count = std::min<size_t>(res.count, MAX_RELAY_LIST_SZ);
-                    for(size_t i = 0; i < count; i++){
-                        const auto& rec = res.relays[i];
-                        if(rec.ipv4 == 0)
-                            continue;
-                        RelayInfo rinfo;
-                        rinfo.session_id = static_cast<session_id_t>(-1);
-                        rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(ntohl(rec.ipv4)), ntohs(rec.port));
-                        result_relays.push_back(rinfo);
-                    }
-                }
-                co_return result_relays;
+    if(std::holds_alternative<std::vector<uint8_t>>(response)){
+        // client::process_incoming_packet already parsed the raw packet. we just get the response body.
+        std::vector<uint8_t> payload = std::get<std::vector<uint8_t>>(std::move(response));
+        if(payload.size() >= sizeof(RelayListRes)){
+            RelayListRes res{};
+            std::memcpy(&res, payload.data(), sizeof(RelayListRes));
+            size_t count = std::min<size_t>(res.count, MAX_RELAY_LIST_SZ);
+            for(size_t i = 0; i < count; i++){
+                const auto& rec = res.relays[i];
+                if(rec.ipv4 == 0)
+                    continue;
+                RelayInfo rinfo;
+                rinfo.session_id = static_cast<session_id_t>(-1);
+                rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(ntohl(rec.ipv4)), ntohs(rec.port));
+                result_relays.push_back(rinfo);
             }
-
-            auto& mut = relays_info_glb->registry_mutex_;
-            std::lock_guard<std::mutex> lock(mut);
-            relays_info_glb->pending_requests_.erase(relay.session_id);
         }
-        catch(...){
-            // retry on exception
-        }
-        timeout *= 2;
     }
 
     co_return result_relays;
@@ -352,23 +331,48 @@ asio::awaitable<Node::CommError> Node::establish_connection(RelayInfo relay,
     if(relay.endpoint.protocol() == asio::ip::udp::v6())
         co_return CommError(true, "relay.endpoint is of type ipv6");
 
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_int_distribution<session_id_t> dist(0, std::numeric_limits<session_id_t>::max() - 1);
+    relay.session_id = RandomGen::gen_session_id();
+    const txn_id_t txn_id = RandomGen::gen_txn_id();
 
-    relay.session_id = dist(gen);
+    const auto packet = make_connection_packet(relay, txn_id);
 
-    const auto packet = make_connection_packet(relay);
+    auto res = co_await control_send_and_wait_udp(udp_sockv4, packet, relay.endpoint, txn_id, relays_info_glb);
 
+    if(std::holds_alternative<std::vector<uint8_t>>(res)){
+        auto response = std::get<std::vector<uint8_t>>(std::move(res));
+        // todo: process payload (encryption mostly)
+        // client::process_incoming_packet already parsed the raw packet. we just get the response body.
+        co_return false;
+    }
+
+    co_return std::get<CommError>(res);
+}
+
+
+asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
+                                                                     std::vector<uint8_t> packet,
+                                                                     asio::ip::udp::endpoint endpoint,
+                                                                     txn_id_t txn_id,
+                                                                     std::shared_ptr<RelaysInfoGlb> relays_info_glb){
+    auto executor = co_await asio::this_coro::executor;
     auto timeout = udp_comms_config::start_timeout;
 
-    std::vector<uint8_t> response_buf(1024);
+    struct RAII_cleanup{
+        std::shared_ptr<RelaysInfoGlb> info;
+        txn_id_t id;
 
-    auto executor = co_await asio::this_coro::executor;
+
+        ~RAII_cleanup(){
+            if(info){
+                std::lock_guard<std::mutex> lock(info->registry_mutex_);
+                info->pending_requests_.erase(id);
+            }
+        }
+    } cleanup{relays_info_glb, txn_id};
 
     for(size_t attempt = 1; attempt <= udp_comms_config::max_attempts; attempt++){
         try{
-            asio::ip::udp::endpoint sender_endpoint;
-            co_await udp_sockv4->async_send_to(asio::buffer(packet), relay.endpoint, asio::use_awaitable);
+            co_await udp_sockv4->async_send_to(asio::buffer(packet), endpoint, asio::use_awaitable);
 
             asio::steady_timer timer(executor, timeout);
 
@@ -376,29 +380,29 @@ asio::awaitable<Node::CommError> Node::establish_connection(RelayInfo relay,
             // wait for timer / response
             using namespace boost::asio::experimental::awaitable_operators;
             auto result = co_await (
-                async_wait_for_response(relay.session_id, asio::use_awaitable, relays_info_glb)
+                async_wait_for_response(txn_id, asio::use_awaitable, relays_info_glb)
                 ||
                 timer.async_wait(asio::use_awaitable)
             );
 
             if(result.index() == 0){
-                // todo: parse response and return
-                co_return CommError(false);
+                timer.cancel();
+                auto response_packet = std::get<0>(std::move(result));
+                co_return response_packet;
             }
 
             auto& mut = relays_info_glb->registry_mutex_;
             std::lock_guard<std::mutex> lock(mut);
-            relays_info_glb->pending_requests_.erase(relay.session_id);
+            relays_info_glb->pending_requests_.erase(txn_id);
         }
-        catch(const std::exception& ex){
-            co_return CommError(true, std::string("establish_connection failed : ") + ex.what());
+        catch(const std::exception& /*ex*/){
+            // retry on exception
         }
 
         timeout *= 2;
     }
 
-    relay.session_id = static_cast<session_id_t>(-1);
-    co_return false;
+    co_return CommError(true, "didn't receive response, max attempts reached");
 }
 
 
@@ -468,7 +472,7 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
         }
         case RoutingFlag::RELAY_TO_EXIT: {
             if(exit_)
-                exit_->process_incoming_packet(std::move(packet));
+                exit_->process_incoming_packet(std::move(packet), endpoint);
             return;
         }
         default: {
@@ -479,14 +483,14 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
 }
 
 
-void Node::resume_establishing_connection(session_id_t session_id,
-                                          std::vector<uint8_t> payload,
-                                          std::shared_ptr<RelaysInfoGlb> relays_info_glb){
+void Node::resume_control_operation(txn_id_t txn_id,
+                                    std::vector<uint8_t> payload,
+                                    std::shared_ptr<RelaysInfoGlb> relays_info_glb){
     RelaysInfoGlb::ResponseHandler handler;
     {
         auto& mut = relays_info_glb->registry_mutex_;
         std::lock_guard<std::mutex> lock(mut);
-        auto it = relays_info_glb->pending_requests_.find(session_id);
+        auto it = relays_info_glb->pending_requests_.find(txn_id);
         if(it != relays_info_glb->pending_requests_.end()){
             handler = std::move(it->second);
             relays_info_glb->pending_requests_.erase(it);
@@ -494,7 +498,7 @@ void Node::resume_establishing_connection(session_id_t session_id,
     }
 
     if(handler){
-        // executing this handler resumes the waiting coroutine (establish_connection)
+        // executing this handler resumes the waiting coroutine
         handler(boost::system::error_code{}, std::move(payload));
     }
 }

@@ -117,7 +117,7 @@ static std::vector<uint8_t> make_relay_handshake_rep_pakcet(const session_id_t s
     resp_chdr.msg_type = ControlMsgType::RELAY_HANDSHAKE_RESP;
     resp_chdr.flags = 0;
     resp_chdr.payload_len = static_cast<uint16_t>(sizeof(RelayHandshakeRes));
-    resp_chdr.sequence_id = chdr.sequence_id;
+    resp_chdr.txn_id = chdr.txn_id;
     std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
     offset += CONTROL_HDR_SZ;
 
@@ -152,7 +152,7 @@ static std::vector<uint8_t> make_relay_list_rep_packet(const session_id_t sid, c
     resp_chdr.msg_type = ControlMsgType::RELAY_DISCOVERY_RESP;
     resp_chdr.flags = 0;
     resp_chdr.payload_len = static_cast<uint16_t>(sizeof(RelayListRes));
-    resp_chdr.sequence_id = chdr.sequence_id;
+    resp_chdr.txn_id = chdr.txn_id;
     std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
     offset += CONTROL_HDR_SZ;
 
@@ -248,10 +248,78 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             return;
         }
 
+        case ControlMsgType::RELAY_SETUP_EXIT_REQ: {
+            if(body_len < sizeof(RelaySetupExitReq)){
+                LOG_ERROR(logger_, "RelaySetupExitReq payload too small.");
+                return;
+            }
+            RelaySetupExitReq req{};
+            std::memcpy(&req, msg_body, sizeof(RelaySetupExitReq));
+
+            asio::ip::udp::endpoint exit_ep(
+                asio::ip::address_v4(ntohl(req.exit_ipv4)),
+                ntohs(req.exit_port)
+            );
+
+            // update maps
+            sid_ei_umap_.put_if_absent(sid, ExitInfo{ .endpoint = exit_ep });
+            cid_ci_umap_.put_if_absent(req.circuit_id, *sid_ci_umap_.get(sid));
+
+            RelaySetupExitRes res{ .status = 0};
+            auto resp_buf = make_relay_setup_exit_res_packet(sid, chdr, res);
+
+            auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+            auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
+            sock->async_send_to(
+                asio::buffer(*send_data),
+                sender_endpoint,
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                    if(ec){
+                        LOG_ERROR(me->logger_, "Failed to send RelaySetupExitRes: {}", ec.message());
+                    }
+                }
+            );
+            return;
+        }
+
         default:
             LOG_WARNING(logger_, "Unhandled client control message: {}", static_cast<int>(chdr.msg_type));
             break;
     }
+}
+
+
+std::vector<uint8_t> Relay::make_relay_setup_exit_res_packet(const session_id_t sid, const ControlHeader& chdr, const RelaySetupExitRes& res){
+    std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelaySetupExitRes));
+    size_t offset = 0;
+
+    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::RELAY_TO_CLIENT);
+    offset += sizeof(RoutingFlag);
+
+    for(size_t i = 0; i < sizeof(session_id_t); i++){
+        resp_buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
+    }
+    offset += sizeof(session_id_t);
+
+    TransitHeader thdr{};
+    thdr.circuit_id = static_cast<circuit_id_t>(-1);
+    thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelaySetupExitRes));
+    thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
+    thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(resp_buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader resp_chdr{};
+    resp_chdr.msg_type = ControlMsgType::RELAY_SETUP_EXIT_RES;
+    resp_chdr.flags = 0;
+    resp_chdr.payload_len = static_cast<uint16_t>(sizeof(RelaySetupExitRes));
+    resp_chdr.txn_id = chdr.txn_id;
+    std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    std::memcpy(resp_buf.data() + offset, &res, sizeof(RelaySetupExitRes));
+
+    return resp_buf;
 }
 
 

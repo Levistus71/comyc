@@ -5,13 +5,16 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <random>
 
+#include "src/network/comms/control.hpp"
 #include <src/node/buffers/arena_allocator.hpp>
 #include <src/node/buffers/reorder_buffer.hpp>
 #include "src/network/packets/cell.hpp"
 
 #include <boost/container_hash/hash.hpp>
 #include <boost/asio.hpp>
+
 
 
 #if !defined(__cpp_lib_atomic_shared_ptr) || __cpp_lib_atomic_shared_ptr < 201711L
@@ -242,6 +245,12 @@ struct NetworkTuple{
                (src_port == other.src_port) &&
                (dest_port == other.dest_port);
     }
+
+
+    std::string to_string() const{
+        return src_addr.to_string() + ":" + std::to_string(src_port) + " -> " +
+           dest_addr.to_string() + ":" + std::to_string(dest_port);
+    }
 };
 
 
@@ -262,13 +271,33 @@ struct std::hash<NetworkTuple>{
 
 
 struct RelayInfo{
-    session_id_t session_id = -1;           // -1 : not connected, else : connected
+    session_id_t session_id; // -1 : not connected, anything else: connected
     asio::ip::udp::endpoint endpoint;
     // relay performance
     // sh_cr
 
     bool operator==(const RelayInfo& other) const{
         return endpoint == other.endpoint;
+    }
+
+    std::string to_string(){
+        std::stringstream ss;
+        ss << "RelayInfo{";
+
+        if (session_id == -1) {
+            ss << "status: not connected";
+        } else {
+            ss << "session_id: " << session_id << ", status: connected";
+        }
+
+        ss << ", endpoint: " << endpoint.address().to_string()
+           << ":" << endpoint.port() << "}";
+
+        return ss.str();
+    }
+
+    bool is_connected() const{
+        return session_id != static_cast<session_id_t>(-1);
     }
 };
 
@@ -286,12 +315,70 @@ struct std::hash<RelayInfo>{
 };
 
 
+template<size_t WindowSeconds = 10>
+class Statistics{
+public:
+    void record_use(uint64_t count = 1){
+        auto now_sec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        auto index = static_cast<size_t>(now_sec % WindowSeconds);
+        auto& bucket = buckets_[index];
+
+        int64_t expected_ts = bucket.timestamp_sec.load(std::memory_order_relaxed);
+        if(expected_ts != now_sec){
+            if(bucket.timestamp_sec.compare_exchange_strong(expected_ts, now_sec, std::memory_order_acq_rel)){
+                bucket.count.store(count, std::memory_order_relaxed);
+                return;
+            }
+        }
+        bucket.count.fetch_add(count, std::memory_order_relaxed);
+    }
+
+
+    [[nodiscard]] uint64_t get_rate_in_window() const{
+        const auto now_sec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        uint64_t total = 0;
+        for(size_t i = 0; i < WindowSeconds; ++i){
+            if(int64_t ts = buckets_[i].timestamp_sec.load(std::memory_order_relaxed); now_sec - ts < static_cast<int64_t>(WindowSeconds)){
+                total += buckets_[i].count.load(std::memory_order_relaxed);
+            }
+        }
+        return total;
+    }
+
+    std::atomic<bool> new_circuit_queued{false};
+    std::atomic<bool> dont_create_new_circuit{false};
+
+private:
+    struct Bucket{
+        std::atomic<int64_t> timestamp_sec{0};
+        std::atomic<uint64_t> count{0};
+    };
+
+
+    Bucket buckets_[WindowSeconds];
+};
+
+
+class Client;
+
+
 struct CircuitInfo{
     circuit_id_t circuit_id;
     std::shared_ptr<std::atomic<sequence_id_t>> sequence_id_ptr;
+
     std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
+
     // sh_ce
     std::shared_ptr<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>> reorder_buffer;
+    NetworkTuple nt;
+
+    std::shared_ptr<Statistics<10>> activity_counter;
+
+    void touch(const std::shared_ptr<Client>& client_ptr) const;
 };
 
 
@@ -301,5 +388,31 @@ struct RelaysInfoGlb{
     std::unordered_set<RelayInfo> all_relays;
     std::unordered_set<RelayInfo> usable_relays;
     std::mutex registry_mutex_;
-    std::unordered_map<session_id_t, ResponseHandler> pending_requests_;
+    std::unordered_map<txn_id_t, ResponseHandler> pending_requests_;
+};
+
+
+class RandomGen {
+public:
+    static txn_id_t gen_txn_id() {
+        std::uniform_int_distribution<txn_id_t> dist;
+        return dist(gen_);
+    }
+
+    static sequence_id_t gen_seq_id() {
+        std::uniform_int_distribution<sequence_id_t> dist;
+        return dist(gen_);
+    }
+
+    static session_id_t gen_session_id() {
+        std::uniform_int_distribution<session_id_t> dist;
+        return dist(gen_);
+    }
+
+    static circuit_id_t gen_circuit_id() {
+        std::uniform_int_distribution<circuit_id_t> dist;
+        return dist(gen_);
+    }
+
+    inline thread_local static std::mt19937 gen_{std::random_device{}()};
 };

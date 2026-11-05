@@ -185,18 +185,149 @@ std::shared_ptr<RelayInfo> Exit::choose_relay(const std::shared_ptr<CircuitInfo>
 }
 
 
-void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet){
+void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint sender_endpoint){
     if(!packet){
         LOG_WARNING(logger_, "Recieved empty packet.");
         return;
     }
 
-    if(!parse_incoming_packet(packet)){
+    if(!parse_thdr_incoming_packet(packet)){
         LOG_ERROR(logger_, "Failed to parse incoming packet.");
         return;
     }
 
+    // todo: do this better. better if we store the entire thdr in the packet and ask parse_thdr_incoming_packet to
+    // todo: handle that
+    if(packet->route_flag == RoutingFlag::RELAY_TO_EXIT){
+        TransitHeader thdr{};
+        if(packet->payload_bytes >= TRANSIT_HDR_SZ){
+            std::memcpy(&thdr, packet->payload.data() + packet->start_offset, TRANSIT_HDR_SZ);
+            if(thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)) [[unlikely]] {
+                handle_control_from_relay(std::move(packet), sender_endpoint);
+                return;
+            }
+        }
+    }
+
+    // todo: offset packet to actual data (currently inserting the whole packet)
+    // bug: ^
     insert_into_rob(std::move(packet));
+}
+
+
+void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio::ip::udp::endpoint& relay_endpoint){
+    const size_t min_sz = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ;
+    if(packet->bytes_received < min_sz){
+        LOG_ERROR(logger_, "Dropping control packet at exit: size too small ({})", packet->bytes_received);
+        return;
+    }
+
+    TransitHeader thdr{};
+    std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag), TRANSIT_HDR_SZ);
+
+    ControlHeader chdr{};
+    std::memcpy(&chdr, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, CONTROL_HDR_SZ);
+
+    const uint8_t* body_ptr = packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ;
+    const size_t body_len = packet->bytes_received - min_sz;
+
+    switch(chdr.msg_type){
+        case ControlMsgType::EXIT_HANDSHAKE_REQ: {
+            if(body_len < sizeof(ExitHandshakeReq)){
+                LOG_ERROR(logger_, "ExitCircuitCreateReq payload too small.");
+                return;
+            }
+            ExitHandshakeReq req{};
+            std::memcpy(&req, body_ptr, sizeof(ExitHandshakeReq));
+
+            const circuit_id_t cid = req.requested_cid;
+            const sequence_id_t client_initial_seq = req.start_seq_client;
+            const sequence_id_t our_initial_seq = RandomGen::gen_seq_id();
+
+            // insert cid in cid_ci_umap_
+            {
+                std::vector<std::shared_ptr<RelayInfo>> relays;
+                for(size_t i = 0; i < req.relay_list.count; i++){
+                    const auto& relay = req.relay_list.relays[i];
+                    if(relay.ipv4 == 0)
+                        continue;
+                    RelayInfo rinfo;
+                    rinfo.session_id = static_cast<session_id_t>(-1);
+                    rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(ntohl(relay.ipv4)), ntohs(relay.port));
+                    relays.push_back(std::make_shared<RelayInfo>(rinfo));
+                }
+
+                auto ci = std::make_shared<CircuitInfo>(CircuitInfo{
+                    .circuit_id      = cid,
+                    .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
+                    .relays          = std::move(relays),
+                    .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(Settings::REORDER_BUFFER_SIZE, client_initial_seq)
+                });
+
+                cid_ci_umap_.put(cid, ci);
+            }
+
+            // build EXIt to send back through the relay
+            // RoutingFlag::EXIT_TO_RELAY + TransitHeader + ControlHeader + ExitCircuitCreateRes
+            auto resp_packet = make_exit_handshake_resp_packet(chdr, cid, our_initial_seq, Settings::REORDER_BUFFER_SIZE);
+
+            auto sock = (relay_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+            auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_packet));
+            sock->async_send_to(
+                asio::buffer(*send_data),
+                relay_endpoint,
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                    if(ec){
+                        LOG_ERROR(me->logger_, "Failed to send ExitCircuitCreateRes: {}", ec.message());
+                    }
+                }
+            );
+            return;
+        }
+
+        default:
+            LOG_WARNING(logger_, "Unhandled control message: {}", static_cast<int>(chdr.msg_type));
+            break;
+    }
+}
+
+
+std::vector<uint8_t> Exit::make_exit_handshake_resp_packet(const ControlHeader& chdr,
+                                                           circuit_id_t cid,
+                                                           sequence_id_t seq_id,
+                                                           uint64_t reorder_buffer_size){
+    std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeRes));
+    size_t offset = 0;
+
+    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::EXIT_TO_RELAY);
+    offset += sizeof(RoutingFlag);
+
+    TransitHeader resp_thdr{};
+    resp_thdr.circuit_id = cid;
+    resp_thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(ExitHandshakeRes));
+    resp_thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
+    resp_thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(resp_buf.data() + offset, &resp_thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader resp_chdr{};
+    resp_chdr.msg_type = ControlMsgType::EXIT_HANDSHAKE_RESP;
+    resp_chdr.flags = 0;
+    resp_chdr.payload_len = static_cast<uint16_t>(sizeof(ExitHandshakeRes));
+    resp_chdr.txn_id = chdr.txn_id;
+    std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    ExitHandshakeRes res{
+        .confirmed_cid   = cid,
+        .start_seq_exit  = seq_id,
+        .rob_window_size = static_cast<uint32_t>(reorder_buffer_size),
+        .status_code     = 0,
+        ._reserved_      = {0, 0, 0}
+    };
+    std::memcpy(resp_buf.data() + offset, &res, sizeof(ExitHandshakeRes));
+
+    return resp_buf;
 }
 
 
@@ -208,8 +339,24 @@ incoming packet:
 thdr:
 circuit_id is at the start
 */
-[[nodiscard]] bool Exit::parse_incoming_packet(ArenaSlot<IncomingCell>& packet){
-    // todo: this,
+[[nodiscard]] bool Exit::parse_thdr_incoming_packet(const ArenaSlot<IncomingCell>& packet){
+    if(packet->bytes_received < sizeof(RoutingFlag) + TRANSIT_HDR_SZ){
+        return false;
+    }
+
+    TransitHeader thdr{};
+    std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag), TRANSIT_HDR_SZ);
+
+    packet->cid = thdr.circuit_id;
+    packet->start_offset = sizeof(RoutingFlag);
+    packet->payload_bytes = packet->bytes_received - sizeof(RoutingFlag);
+
+    if(packet->bytes_received >= sizeof(RoutingFlag) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ){
+        PayloadHeader phdr{};
+        std::memcpy(&phdr, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, PAYLOAD_HDR_SZ);
+        packet->seq_id = phdr.sequence_id;
+    }
+
     return true;
 }
 

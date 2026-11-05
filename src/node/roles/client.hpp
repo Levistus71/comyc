@@ -60,6 +60,9 @@ struct OngoingCircuitCalcInfo{
 
 class Client : public std::enable_shared_from_this<Client>{
 public:
+    friend struct CircuitInfo;
+
+
     Client(asio::io_context& ioc,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
@@ -82,6 +85,17 @@ public:
 
 
     void process_incoming_packet(ArenaSlot<IncomingCell> packet);
+
+
+    asio::awaitable<void> make_new_circuit(NetworkTuple nt);
+
+
+    struct Settings{
+        static constexpr uint64_t HIGH_USAGE_THRESHOLD = 300;
+        static constexpr uint64_t DEFAULT_NUM_ENTRY_RELAYS = 2;
+
+        static_assert(DEFAULT_NUM_ENTRY_RELAYS<MAX_RELAYS_PER_CIRCUIT, "Default number of entry relays too large.");
+    };
 
 private:
     asio::io_context& ioc_;
@@ -124,16 +138,29 @@ private:
     void continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> ci, sequence_id_t seq_id);
 
 
-    std::shared_ptr<CircuitInfo> make_new_circuit(NetworkTuple& nt, ArenaSlot<utun::RawPacket>& raw_packet);
+    std::shared_ptr<CircuitInfo> track_new_nt(NetworkTuple& nt, ArenaSlot<utun::RawPacket>& raw_packet);
 
 
-    void compute_drain_new_circuit(std::shared_ptr<OngoingCircuitCalcInfo> cci);
+    static std::vector<uint8_t> make_relay_setup_exit_req_packet(session_id_t sid,
+                                                                 const asio::ip::udp::endpoint& exit_ep,
+                                                                 txn_id_t txn_id,
+                                                                 circuit_id_t circuit_id);
+
+
+    static std::vector<uint8_t> make_exit_handshake_packet(session_id_t sid,
+                                                           circuit_id_t cid,
+                                                           txn_id_t txn_id,
+                                                           sequence_id_t our_start_seq,
+                                                           std::vector<std::shared_ptr<RelayInfo>> selected_relays);
+
+
+    void compute_new_nt_ci(std::shared_ptr<OngoingCircuitCalcInfo> cci);
 
 
     void handle_non_pioneers(const std::shared_ptr<OngoingCircuitCalcInfo>& curr_state, ArenaSlot<utun::RawPacket> raw_packet);
 
 
-    void drain_new_circuit_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state);
+    void drain_new_nt_packets(const std::shared_ptr<OngoingCircuitCalcInfo>& state);
 
 
     std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);

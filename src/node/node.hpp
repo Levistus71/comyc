@@ -115,9 +115,19 @@ public:
                                                            std::shared_ptr<RelaysInfoGlb> known_relays);
 
 
-    static void resume_establishing_connection(session_id_t session_id,
-                                               std::vector<uint8_t> payload,
-                                               std::shared_ptr<RelaysInfoGlb> relays_info_glb);
+    static void resume_control_operation(txn_id_t txn_id,
+                                         std::vector<uint8_t> payload,
+                                         std::shared_ptr<RelaysInfoGlb> relays_info_glb);
+
+
+    using ControlResult = std::variant<std::vector<uint8_t>, CommError>;
+
+
+    static asio::awaitable<ControlResult> control_send_and_wait_udp(std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
+                                                                    std::vector<uint8_t> packet,
+                                                                    asio::ip::udp::endpoint endpoint,
+                                                                    txn_id_t txn_id,
+                                                                    std::shared_ptr<RelaysInfoGlb> relays_info_glb);
 
 
     /*
@@ -170,7 +180,7 @@ private:
     static bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays);
 
 
-    static std::vector<uint8_t> make_connection_packet(RelayInfo& relay);
+    static std::vector<uint8_t> make_connection_packet(RelayInfo& relay, txn_id_t txn_id);
 
 
     static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay,
@@ -178,22 +188,22 @@ private:
                                                                       std::shared_ptr<RelaysInfoGlb> relays_info_glb);
 
 
-    static std::vector<uint8_t> make_request_relay_list_packet(RelayInfo& relay);
+    static std::vector<uint8_t> make_request_relay_list_packet(RelayInfo& relay, txn_id_t txn_id);
 
 
     template<class CompletionToken>
-    static auto async_wait_for_response(session_id_t session_id, CompletionToken&& token, const std::shared_ptr<RelaysInfoGlb>& relays_info_glb){
+    static auto async_wait_for_response(txn_id_t txn_id, CompletionToken&& token, const std::shared_ptr<RelaysInfoGlb>& relays_info_glb){
         using Signature = void(boost::system::error_code, std::vector<uint8_t>);
 
         return asio::async_initiate<CompletionToken, Signature>(
-            [session_id, relays_info_glb](auto handler){
+            [txn_id, relays_info_glb](auto handler){
                 auto unbound_handler = [h = std::move(handler)](boost::system::error_code ec, std::vector<uint8_t> data) mutable{
                     h(ec, std::move(data));
                 };
 
                 std::mutex& mtx = relays_info_glb->registry_mutex_;
                 std::lock_guard<std::mutex> lock(mtx);
-                relays_info_glb->pending_requests_[session_id] = std::move(unbound_handler);
+                relays_info_glb->pending_requests_[txn_id] = std::move(unbound_handler);
             },
             token
         );
