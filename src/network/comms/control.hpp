@@ -120,6 +120,7 @@ struct ControlHeader{
     txn_id_t txn_id;         // 8 bytes: transaction id for the messages
 };
 
+
 static_assert(sizeof(ControlHeader) == 16, "ControlHeader layout broken");
 static_assert(std::is_trivially_copyable_v<ControlHeader>, "ControlHeader is not memcpy safe");
 constexpr size_t CONTROL_HDR_SZ = sizeof(ControlHeader);
@@ -130,6 +131,7 @@ struct RelayHandshakeReq{
     // todo: encryption stuff
 };
 
+
 static_assert(sizeof(RelayHandshakeReq) == 4, "RelayHandshakeReq layout broken");
 static_assert(std::is_trivially_copyable_v<RelayHandshakeReq>, "RelayHandshakeReq not memcpy safe");
 
@@ -138,6 +140,7 @@ struct RelayHandshakeRes{
     session_id_t session_id_res;
     // todo: encryption stuff
 };
+
 
 static_assert(sizeof(RelayHandshakeRes) == 4, "RelayHandshakeRes layout broken");
 static_assert(std::is_trivially_copyable_v<RelayHandshakeRes>, "RelayHandshakeRes not memcpy safe");
@@ -152,6 +155,7 @@ struct RelayListReq{
     uint8_t _reserved_[2];     // 2 bytes: padding
 };
 
+
 static_assert(sizeof(RelayListReq) == 4, "RelayListReq layout broken");
 static_assert(std::is_trivially_copyable_v<RelayListReq>, "RelayListReq not memcpy safe");
 
@@ -163,6 +167,7 @@ struct RelayCandidateRecord{
     uint8_t bandwidth_tier; // 1 byte:  Relay capacity tier
 };
 
+
 static_assert(sizeof(RelayCandidateRecord) == 8, "RelayCandidateRecord layout broken");
 static_assert(std::is_trivially_copyable_v<RelayCandidateRecord>, "RelayCandidateRecord not memcpy safe");
 
@@ -172,6 +177,7 @@ struct RelayListRes{
     uint8_t _reserved_[6];                          // 6 bytes: padding
     RelayCandidateRecord relays[MAX_RELAY_LIST_SZ]; // 128 bytes: relay information
 };
+
 
 static_assert(sizeof(RelayListRes) == 136, "RelayListRes layout broken");
 static_assert(std::is_trivially_copyable_v<RelayListRes>, "RelayListRes not memcpy safe");
@@ -184,13 +190,15 @@ struct RelaySetupExitReq{
     uint8_t _reserved_[2];   // 2 bytes: reserved
 };
 
+
 static_assert(sizeof(RelaySetupExitReq) == 16, "RelaySetupExitReq layout broken");
 static_assert(std::is_trivially_copyable_v<RelaySetupExitReq>, "RelaySetupExitReq not memcpy safe");
 
 
 struct RelaySetupExitRes{
-    uint8_t status;        // 1 byte:  0 = ok, 1 = error
+    uint8_t status; // 1 byte:  0 = ok, 1 = error
 };
+
 
 static_assert(sizeof(RelaySetupExitRes) == 1, "RelaySetupExitRes layout broken");
 static_assert(std::is_trivially_copyable_v<RelaySetupExitRes>, "RelaySetupExitRes not memcpy safe");
@@ -202,20 +210,26 @@ struct RelayList{
     RelayCandidateRecord relays[MAX_RELAYS_PER_CIRCUIT]; // 40 bytes: relay information
 };
 
+
 static_assert(sizeof(RelayList) == 48, "RelayList layout broken");
 static_assert(std::is_trivially_copyable_v<RelayList>, "RelayList not memcpy safe");
 
 
 struct ExitHandshakeReq{
-    uint32_t ipv4;                  // 4 bytes: private ip requested by client
-    uint8_t _reserved_[4];          // 4 bytes: padding
+    uint32_t client_ipv4;           // 4 bytes: private ip requested by client
+    uint32_t dest_ipv4;             // 4 bytes: destination ip
+    uint16_t client_port;           // 2 bytes: client port
+    uint16_t dest_port;             // 2 bytes: destination port
+    bool default_circuit;           // 1 byte: is it a default circuit? if so, dest_ipv4, dest_port, client_port are all invalid
+    uint8_t _reserved_[3];          // 4 bytes: padding
     circuit_id_t requested_cid;     // 8 bytes: circuit id requested by client
     sequence_id_t start_seq_client; // 8 bytes: start sequence id used by the client
     RelayList relay_list;           // 48 bytes: relay list
     // todo: encryption
 };
 
-static_assert(sizeof(ExitHandshakeReq) == 72, "ExitCircuitCreateReq layout broken");
+
+static_assert(sizeof(ExitHandshakeReq) == 80, "ExitCircuitCreateReq layout broken");
 static_assert(std::is_trivially_copyable_v<ExitHandshakeReq>, "ExitCircuitCreateReq not memcpy safe");
 
 
@@ -227,6 +241,7 @@ struct ExitHandshakeRes{
     uint8_t _reserved_[3];        // 3 bytes: padding
     // todo: encryption
 };
+
 
 static_assert(sizeof(ExitHandshakeRes) == 24, "ExitCircuitCreateRes layout broken");
 static_assert(std::is_trivially_copyable_v<ExitHandshakeRes>, "ExitCircuitCreateRes not memcpy safe");

@@ -100,6 +100,7 @@ private:
 
     // from destination to client
     RCU_UMap<NetworkTuple, std::shared_ptr<CircuitInfo>> nt_ci_umap_;
+    RCU_UMap<SrcAddrNetworkTuple, std::shared_ptr<CircuitInfo>> sant_ci_umap_;
 
     // from client to destination
     RCU_UMap<circuit_id_t, std::shared_ptr<CircuitInfo>> cid_ci_umap_;

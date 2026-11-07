@@ -95,7 +95,7 @@ public:
         static constexpr uint64_t HIGH_USAGE_THRESHOLD = 300;
         static constexpr uint64_t DEFAULT_NUM_ENTRY_RELAYS = 2;
 
-        static_assert(DEFAULT_NUM_ENTRY_RELAYS<MAX_RELAYS_PER_CIRCUIT, "Default number of entry relays too large.");
+        static_assert(DEFAULT_NUM_ENTRY_RELAYS < MAX_RELAYS_PER_CIRCUIT, "Default number of entry relays too large.");
 
         static constexpr uint64_t ARENA_SLOTS = 16384;
     };
@@ -158,7 +158,11 @@ private:
                                                            txn_id_t txn_id,
                                                            sequence_id_t our_start_seq,
                                                            const std::vector<std::shared_ptr<RelayInfo>>& selected_relays,
-                                                           const asio::ip::address_v4& our_vpn_address);
+                                                           const asio::ip::address_v4& our_address_v4,
+                                                           uint16_t our_port,
+                                                           const asio::ip::address_v4& dest_address_v4,
+                                                           uint16_t dest_port,
+                                                           bool default_circuit);
 
 
     void compute_new_nt_ci(std::shared_ptr<OngoingCircuitCalcInfo> cci);

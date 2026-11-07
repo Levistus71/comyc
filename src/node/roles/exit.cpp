@@ -30,7 +30,7 @@ Exit::~Exit(){
         return false;
     }
 
-    if(!utun_.start(false)){
+    if(!utun_.start(false, RandomGen::gen_address_v4(), RandomGen::gen_address_v6())){
         LOG_ERROR(logger_, "[UTUN] Failed to start utun.");
         return false;
     }
@@ -93,22 +93,26 @@ void Exit::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
         return;
     }
 
-    // fixme: src_addr is destination's ip, dest_addr is client's virtual ip
-    // todo:    this ^
-    // bug:     this ^^
-    // NOTE:    this ^^^
-    NetworkTuple nt{
-        .src_addr  = raw_packet->src_addr,
-        .dest_addr = raw_packet->dest_addr,
+    // NOTE: src_addr is destination's ip, dest_addr is client's virtual ip
+    NetworkTuple nt = NetworkTuple::create_exit_nt(
+        raw_packet->dest_addr,
+        raw_packet->src_addr,
+        raw_packet->dest_port,
+        raw_packet->src_port
+    );
 
-        .src_port  = raw_packet->src_port,
-        .dest_port = raw_packet->dest_port,
-    };
-
+    // first check for nt, then for default circuits (sant)
     auto ci = nt_ci_umap_.get(nt);
-    if(ci == nullptr) [[unlikely]] {
-        LOG_ERROR(logger_, "Dropping faulty packet from utun, circuit information couldn't be found from parsed nt.");
-        return;
+    if(ci == nullptr){
+        const SrcAddrNetworkTuple sant{
+            .e_client_addr = nt.e_client_addr
+        };
+        ci = sant_ci_umap_.get(sant);
+
+        if(ci == nullptr) [[unlikely]] {
+            LOG_ERROR(logger_, "Dropping faulty packet from utun, circuit information couldn't be found from parsed nt.");
+            return;
+        }
     }
 
     // update seq_id before returning to read_packet.
@@ -244,6 +248,8 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
             const sequence_id_t client_initial_seq = req.start_seq_client;
             const sequence_id_t our_initial_seq = RandomGen::gen_seq_id();
 
+            std::shared_ptr<CircuitInfo> ci = nullptr;
+
             // insert cid in cid_ci_umap_
             {
                 std::vector<std::shared_ptr<RelayInfo>> relays;
@@ -257,7 +263,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                     relays.push_back(std::make_shared<RelayInfo>(rinfo));
                 }
 
-                auto ci = std::make_shared<CircuitInfo>(CircuitInfo{
+                ci = std::make_shared<CircuitInfo>(CircuitInfo{
                     .circuit_id      = cid,
                     .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
                     .relays          = std::move(relays),
@@ -267,9 +273,29 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 cid_ci_umap_.put(cid, ci);
             }
 
-            //todo: update nt_ci_umap_ (assign virtual ip to client, use that for nt_ci)
+            // update sant_nt_ci_umap_/nt_ci_umap_ (assign virtual ip to client, use that for nt_ci)
             {
+                asio::ip::address_v4 client_req_private_ip = asio::ip::make_address_v4(ntohl(req.client_ipv4));
 
+                if(req.default_circuit){
+                    SrcAddrNetworkTuple nt{
+                        .e_client_addr = client_req_private_ip
+                    };
+                    sant_ci_umap_.put_if_absent(nt, ci);
+                }
+                else{
+                    asio::ip::address_v4 destinatation_ip = asio::ip::make_address_v4(ntohl(req.dest_ipv4));
+                    uint16_t client_port = req.client_port;
+                    uint16_t dest_port = req.dest_port;
+
+                    NetworkTuple nt = NetworkTuple::create_exit_nt(
+                        client_req_private_ip,
+                        destinatation_ip,
+                        client_port,
+                        dest_port
+                    );
+                    nt_ci_umap_.put_if_absent(nt, ci);
+                }
             }
 
             // build EXIt to send back through the relay
@@ -398,7 +424,7 @@ void Exit::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet){
         utun_stream_,
         asio::buffer(packet->payload.data(), packet->payload_bytes),
         [me = shared_from_this(), pkt = std::move(packet), seq_id]
-    (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
+        (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
             if(ec){
                 LOG_ERROR(me->logger_, "Failed to write seq_id {} to utun: {}", seq_id, ec.message());
             }

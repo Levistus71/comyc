@@ -162,13 +162,12 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
         return;
     }
 
-    NetworkTuple nt{
-        .src_addr  = raw_packet->src_addr,
-        .dest_addr = raw_packet->dest_addr,
-
-        .src_port  = raw_packet->src_port,
-        .dest_port = raw_packet->dest_port,
-    };
+    NetworkTuple nt = NetworkTuple::create_client_nt(
+        raw_packet->src_addr,
+        raw_packet->dest_addr,
+        raw_packet->src_port,
+        raw_packet->dest_port
+    );
 
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr) [[unlikely]] {
@@ -183,6 +182,7 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     // continue_process_raw_packet(std::move(raw_packet), ci);
     asio::post(ioc_, [me = shared_from_this(), rp = std::move(raw_packet), ci, seq_id]() mutable{
         me->continue_process_raw_packet(std::move(rp), ci, seq_id);
+        ci->touch(me);
     });
 
     // returns to loop_utun.
@@ -394,8 +394,13 @@ void Client::stop(){
 
 
 asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
-    if(nt.has_value())
+    if(nt.has_value()){
         LOG_INFO(logger_, "Starting making new circuit, requested by: {}", nt.value().to_string());
+        if(nt->c_dest_addr.is_v6()){
+            LOG_INFO(logger_, "Requested destination ip is ipv6, can't make new circuit. aborting.");
+            co_return false;
+        }
+    }
     else{
         if(default_ci_ != nullptr){
             LOG_ERROR(logger_, "Requested to make default circuit more than once.");
@@ -478,7 +483,19 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     sequence_id_t exit_start_seq = 0;
     auto txn_id = RandomGen::gen_txn_id();
     auto primary_relay = selected_relays[0];
-    auto create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays, default_vpn_v4_);
+
+    std::vector<uint8_t> create_packet;
+    if(nt.has_value()){
+        // not default circuit
+        create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays,
+                                                   default_vpn_v4_, nt->c_src_port, nt->c_dest_addr.to_v4(), nt->c_dest_port, false);
+    }
+    else{
+        // default circuit
+        create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays,
+                                                   default_vpn_v4_, 0, asio::ip::address_v4(), 0, true);
+    }
+
     auto sock = (primary_relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
     auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_);
@@ -709,7 +726,11 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
                                                         txn_id_t txn_id,
                                                         sequence_id_t our_start_seq,
                                                         const std::vector<std::shared_ptr<RelayInfo>>& selected_relays,
-                                                        const asio::ip::address_v4& our_address_v4){
+                                                        const asio::ip::address_v4& our_address_v4,
+                                                        const uint16_t our_port,
+                                                        const asio::ip::address_v4& dest_address_v4,
+                                                        const uint16_t dest_port,
+                                                        bool default_circuit){
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeReq));
     size_t offset = 0;
 
@@ -756,8 +777,11 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
     req.requested_cid = cid;
     req.start_seq_client = our_start_seq;
     req.relay_list = relay_list;
-    const auto bytes = our_address_v4.to_bytes();
-    std::memcpy(&req.ipv4, bytes.data(), sizeof(req.ipv4));
+    req.client_ipv4 = htonl(our_address_v4.to_uint());
+    req.client_port = our_port;
+    req.dest_ipv4 = htonl(dest_address_v4.to_uint());
+    req.dest_port = dest_port;
+    req.default_circuit = default_circuit;
     std::memcpy(buf.data() + offset, &req, sizeof(ExitHandshakeReq));
 
     return buf;
