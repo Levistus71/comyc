@@ -32,7 +32,7 @@ enum class IceMessageType : uint16_t{
 };
 
 // STUN/TURN attribute types
-enum class IceAttributesType: uint16_t{
+enum class IceAttributeType: uint16_t{
     MAPPED_ADDRESS     = 0x0001,
     XOR_MAPPED_ADDRESS = 0x0020,
     USERNAME           = 0x0006,
@@ -71,7 +71,7 @@ struct StunMappedAddressHeader{
 
 // Helper structure for parser ICE attributes
 struct IceAttribute{
-    IceAttributesType type;
+    IceAttributeType type;
     std::vector<uint8_t> value;
 };
 
@@ -102,7 +102,7 @@ public:
     }
 
     // Add an attribute to the packet
-    void add_attribute(IceAttributesType type, const std::vector<uint8_t>& val){
+    void add_attribute(IceAttributeType type, const std::vector<uint8_t>& val){
         attributes.push_back({type, val});
     }
 
@@ -124,7 +124,7 @@ public:
         std::vector<uint8_t> val(sizeof(StunMappedAddressHeader));
         std::memcpy(val.data(), &addr_hdr, sizeof(addr_hdr));
 
-        add_attribute(IceAttributesType::XOR_MAPPED_ADDRESS, val);
+        add_attribute(IceAttributeType::XOR_MAPPED_ADDRESS, val);
     }
 
     // Seralize packet into binary bytes ready for UDP transaction
@@ -195,7 +195,7 @@ public:
             if(offset+attr_len > len) return false;
 
             std::vector<uint8_t> val(data+offset, data+offset+attr_len);
-            out_packet.attributes.push_back({static_cast<IceAttributesType>(attr_type), val});
+            out_packet.attributes.push_back({static_cast<IceAttributeType>(attr_type), val});
 
             // 4-byte alignment
             size_t pad = (4 - (attr_len % 4)) % 4;

@@ -41,23 +41,23 @@ struct Endpoint{
     }
 };
 
-class UpdSocket{
+class UdpSocket{
 private:
     int sockfd_{-1}; // Initialised to -1
 
 public:
-    UpdSocket() = default;
+    UdpSocket() = default;
 
-    ~UpdSocket(){
+    ~UdpSocket(){
         close_socket();
     }
 
     // Prevent copying to manage socket descriptor cleanly
-    UpdSocket(const UpdSocket&) = delete;
-    UpdSocket& operator=(const UpdSocket&) = delete;
+    UdpSocket(const UdpSocket&) = delete;
+    UdpSocket& operator=(const UdpSocket&) = delete;
 
     // Allow move semantics
-    UpdSocket& operator=(UpdSocket&& other) noexcept{
+    UdpSocket& operator=(UdpSocket&& other) noexcept{
         if(this != &other){
             close_socket();
             sockfd_ = other.sockfd_;

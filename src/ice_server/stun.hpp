@@ -59,7 +59,7 @@ private:
         uint8_t error_number = static_cast<uint8_t>(error_code_num%100);
 
         std::vector<uint8_t> err_attr_val = {0x00, 0x00, error_class, error_number};
-        err_pkt.add_attribute(IceAttributesType::ERROR_CODE, err_attr_val);
+        err_pkt.add_attribute(IceAttributeType::ERROR_CODE, err_attr_val);
 
         return err_pkt.serialize();
     }
