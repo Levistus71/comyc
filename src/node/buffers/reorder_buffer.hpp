@@ -157,6 +157,13 @@ private:
     void update_rtt_estimator(){
         auto now = clock_t::now();
         if(last_arrival_time_.time_since_epoch().count() != 0){
+            /*
+                This measures packet inter-arrival jitter, not actual round-trip latency (RTT).
+                Feeding inter-arrival times directly into Jacobson's RTT formula creates an artificial RTO bound
+                rather than a true network RTT bound.
+
+                todo: while sending the packet, send the time of sending
+            */
             auto delta_us = std::chrono::duration_cast<std::chrono::microseconds>(now - last_arrival_time_).count();
             update_circuit_rtt(duration_t(delta_us));
         }
