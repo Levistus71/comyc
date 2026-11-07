@@ -376,8 +376,12 @@ void Client::drain_new_nt_packets(const std::shared_ptr<OngoingCircuitCalcInfo>&
 
 
 std::shared_ptr<RelayInfo> Client::choose_relay(const std::shared_ptr<CircuitInfo>& ci){
-    // TODO: scheduling
-    return ci->relays[0];
+    // todo: this properly
+    if(!ci || ci->relays.empty()){
+        return nullptr;
+    }
+    const size_t idx = relay_rr_counter_.fetch_add(1, std::memory_order_relaxed) % ci->relays.size();
+    return ci->relays[idx];
 }
 
 
@@ -533,7 +537,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         .circuit_id       = assigned_cid,
         .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(exit_start_seq),
         .relays           = selected_relays,
-        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(2048, exit_start_seq),
+        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 2048, exit_start_seq),
         .nt               = nt,
         .activity_counter = std::make_shared<Statistics<10>>()
     });
@@ -584,35 +588,49 @@ incoming packet:
     {thdr, phdr, payload}
 */
 [[nodiscard]] bool Client::parse_incoming_packet(const ArenaSlot<IncomingCell>& packet){
-    if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t)){
+    constexpr size_t min_hdr_sz = sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ;
+    if(packet->bytes_received < min_hdr_sz){
         return false;
     }
 
-    packet->sid = 0;
-    size_t loops = sizeof(session_id_t) / sizeof(uint8_t);
-    for(size_t i = 0; i < loops; i++){
-        uint8_t byte = static_cast<session_id_t>(packet->payload[i + sizeof(RoutingFlag)]);
-        size_t shift = 8 * (loops - i - 1);
-        packet->sid |= (byte << shift);
-    }
+    uint32_t net_sid = 0;
+    std::memcpy(&net_sid, packet->payload.data() + sizeof(RoutingFlag), sizeof(net_sid));
+    packet->sid = ntohl(net_sid);
 
     // todo: decrypt_using_sh_cr()
+
+    TransitHeader thdr{};
+    std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), TRANSIT_HDR_SZ);
+    packet->cid = thdr.circuit_id;
+
+    if(packet->cid == static_cast<circuit_id_t>(-1) || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)){
+        packet->start_offset = min_hdr_sz;
+        packet->payload_bytes = packet->bytes_received - min_hdr_sz;
+        return true;
+    }
+
     // todo: decrypt_using_sh_ce()
 
-    if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(session_id_t) + sizeof(circuit_id_t)){
+    constexpr size_t min_data_sz = sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;
+    if(packet->bytes_received < min_data_sz){
         return false;
     }
 
-    packet->cid = 0;
-    loops = sizeof(circuit_id_t) / sizeof(uint8_t);
-    for(size_t i = 0; i < loops; i++){
-        uint8_t byte = static_cast<circuit_id_t>(packet->payload[i + sizeof(RoutingFlag) + sizeof(session_id_t)]);
-        size_t shift = 8 * (loops - i - 1);
-        packet->cid |= (byte << shift);
-    }
+    PayloadHeader phdr{};
+    std::memcpy(&phdr, packet->payload.data() + min_hdr_sz, PAYLOAD_HDR_SZ);
+    packet->seq_id = phdr.sequence_id;
 
-    // todo: actual ip version, packet parsing, start_offset etc.
-    packet->ip_version_macos = htonl(AF_INET);
+    packet->start_offset = min_data_sz;
+    const size_t available_payload = packet->bytes_received - min_data_sz;
+    packet->payload_bytes = std::min(static_cast<size_t>(phdr.payload_len), available_payload);
+
+    if(packet->payload_bytes > 0){
+        const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
+        packet->ip_version_macos = (ip_ver == 6) ? htonl(AF_INET6) : htonl(AF_INET);
+    }
+    else{
+        packet->ip_version_macos = htonl(AF_INET);
+    }
 
     return true;
 }
@@ -640,10 +658,9 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) co
 
 
 void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
-    // todo: complete this
     auto circuit_info = sid_ci_umap_.get(packet->sid);
     if(!circuit_info){
-        LOG_WARNING(logger_, "Recieved incoming packet with unknown cid: {}", packet->cid);
+        LOG_WARNING(logger_, "Recieved incoming packet with unknown sid: {}, cid: {}", packet->sid, packet->cid);
         return;
     }
 
@@ -656,7 +673,7 @@ void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
             }
         )
     ){
-        LOG_ERROR(logger_, "Reorder buffer insert failed. Redo this log message with clearer error.");
+        LOG_ERROR(logger_, "Reorder buffer insert failed for seq_id {}", packet->seq_id);
     }
 }
 
@@ -666,15 +683,41 @@ void Client::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet)
         return;
     }
 
-    // todo: this properly
+    std::unique_lock<std::mutex> lock(utun_write_mtx_);
+    utun_write_queue_.push_back(std::move(packet));
+    if(!utun_writing_){
+        utun_writing_ = true;
+        do_write_utun(std::move(lock), seq_id);
+    }
+}
+
+
+void Client::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id){
+    if(utun_write_queue_.empty()){
+        utun_writing_ = false;
+        return;
+    }
+
+    auto& pkt = utun_write_queue_.front();
+    std::array<asio::const_buffer, 2> bufs = {
+        asio::buffer(&pkt->ip_version_macos, sizeof(pkt->ip_version_macos)),
+        asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
+    };
+
+    lock.unlock();
+
     asio::async_write(
         utun_stream_,
-        asio::buffer(packet->payload.data(), packet->payload_bytes),
-        [me = shared_from_this(), pkt = std::move(packet), seq_id]
-        (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
+        bufs,
+        [me = shared_from_this(), seq_id](const boost::system::error_code& ec, size_t /*bytes_transferred*/){
             if(ec){
-                LOG_ERROR(me->logger_, "Failed to write seq_id {} to utun: {}", seq_id, ec.message());
+                LOG_ERROR(me->logger_, "Failed to write to utun: {}, seq_id: {}", ec.message(), seq_id);
             }
+            std::unique_lock<std::mutex> lk(me->utun_write_mtx_);
+            if(!me->utun_write_queue_.empty()){
+                me->utun_write_queue_.pop_front();
+            }
+            me->do_write_utun(std::move(lk), seq_id + 1);
         }
     );
 }

@@ -46,10 +46,9 @@ outgoing packet:
         return false;
     }
 
-    packet->sid = (static_cast<session_id_t>(packet->payload[1]) << 24) |
-                  (static_cast<session_id_t>(packet->payload[2]) << 16) |
-                  (static_cast<session_id_t>(packet->payload[3]) << 8) |
-                  static_cast<session_id_t>(packet->payload[4]);
+    uint32_t net_sid = 0;
+    std::memcpy(&net_sid, packet->payload.data() + sizeof(RoutingFlag), sizeof(net_sid));
+    packet->sid = ntohl(net_sid);
 
     packet->outgoing_bytes = packet->bytes_received - sizeof(session_id_t);
     packet->payload_bytes = packet->bytes_received - sizeof(RoutingFlag) - sizeof(session_id_t);
@@ -381,17 +380,13 @@ outgoing packet:
     {thdr, phdr, payload}
 */
 [[nodiscard]] static bool parse_packet_from_exit(const ArenaSlot<IncomingCell>& packet){
-    if(packet->bytes_received < sizeof(RoutingFlag) + sizeof(circuit_id_t)){
+    if(packet->bytes_received < sizeof(RoutingFlag) + TRANSIT_HDR_SZ){
         return false;
     }
 
-    packet->cid = 0;
-    size_t loops = sizeof(circuit_id_t) / sizeof(uint8_t);
-    for(size_t i = 0; i < loops; i++){
-        uint8_t byte = static_cast<circuit_id_t>(packet->payload[i + sizeof(RoutingFlag)]);
-        size_t shift = 8 * (loops - i - 1);
-        packet->cid |= (byte << shift);
-    }
+    TransitHeader thdr{};
+    std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag), TRANSIT_HDR_SZ);
+    packet->cid = thdr.circuit_id;
 
     packet->outgoing_bytes = packet->bytes_received + sizeof(session_id_t);
     packet->payload_bytes = packet->bytes_received - sizeof(RoutingFlag);
@@ -413,7 +408,7 @@ void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
         LOG_WARNING(logger_, "Dropping invalid packet, no circuit_id found.");
         return;
     }
-    packet->sid = client_info->session_id;
+    packet->sid = htonl(client_info->session_id);
 
     // todo: encrypt(packet->payload + sizeof(circuit_id_t), client_info->sh_cr);
 

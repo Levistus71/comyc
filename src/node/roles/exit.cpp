@@ -129,30 +129,43 @@ void Exit::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
 
 void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, std::shared_ptr<CircuitInfo> circuit_info, sequence_id_t seq_id){
     const auto relay = choose_relay(circuit_info);
+    if(!relay){
+        LOG_WARNING(logger_, "No relay available to send packet for cid {}", circuit_info->circuit_id);
+        return;
+    }
 
     const auto app_internal_bytes = raw_packet->bytes_received - FAMILY_HDR_UTUN_SZ;
-    auto headers = std::make_shared<ExitFullHeaders>(ExitFullHeaders{
-        .route_flag = RoutingFlag::EXIT_TO_RELAY,
-        .thdr{
-            .circuit_id   = circuit_info->circuit_id,
-            .frame_len    = 1,
-            .flags        = 0,
-            .payload_tier = PayloadTier::TIER_1024
-        },
-        .phdr{
-            .sequence_id = seq_id,
-            .ip_protocol = 0,
-            .packet_id   = 0,
-            .payload_len = static_cast<uint16_t>(app_internal_bytes),
-            .frag_index  = 0,
-            .frag_total  = 0
-        }
-    });
+    constexpr size_t HEADER_SZ = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;
+    auto header_buf = std::make_shared<std::array<uint8_t, HEADER_SZ>>();
+    size_t offset = 0;
+
+    (*header_buf)[offset] = static_cast<uint8_t>(RoutingFlag::EXIT_TO_RELAY);
+    offset += sizeof(RoutingFlag);
+
+    TransitHeader thdr{
+        .circuit_id   = circuit_info->circuit_id,
+        .frame_len    = static_cast<uint16_t>(PAYLOAD_HDR_SZ + app_internal_bytes),
+        .flags        = 0,
+        .payload_tier = PayloadTier::TIER_1024,
+        ._reserved_   = {0, 0, 0}
+    };
+    std::memcpy(header_buf->data() + offset, &thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    PayloadHeader phdr{
+        .sequence_id = seq_id,
+        .ip_protocol = 0,
+        .packet_id   = 0,
+        .payload_len = static_cast<uint16_t>(app_internal_bytes),
+        .frag_index  = 0,
+        .frag_total  = 0
+    };
+    std::memcpy(header_buf->data() + offset, &phdr, PAYLOAD_HDR_SZ);
 
     // todo: encrypt using sh_ce
-    size_t outgoing_bytes = sizeof(ClientFullHeaders) + app_internal_bytes;
+    size_t outgoing_bytes = HEADER_SZ + app_internal_bytes;
     const std::array<asio::const_buffer, 2> outgoing = {
-        asio::buffer(headers.get(), sizeof(ClientFullHeaders)),
+        asio::buffer(*header_buf),
         asio::buffer(raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes)
     };
 
@@ -164,10 +177,9 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
     sock->async_send_to(
         outgoing,
         relay->endpoint,
-        // raw_packet and headers in the lambda to make sure it doesn't get destroyed
+        // raw_packet and header_buf in the lambda to make sure it doesn't get destroyed
         // NOTE: compiler shouldn't theoretically optimize this packet out of the capture list.
-        // optimize: no shared_ptrs for 1. packet, 2. headers
-        [me=shared_from_this(), outgoing_bytes, keep_alive1 = std::move(raw_packet), keep_alive2 = headers]
+        [me=shared_from_this(), outgoing_bytes, keep_alive1 = std::move(raw_packet), keep_alive2 = header_buf]
         (const boost::system::error_code& ec, std::size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "Send failed: {}", ec.message());
@@ -184,8 +196,12 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
 
 
 std::shared_ptr<RelayInfo> Exit::choose_relay(const std::shared_ptr<CircuitInfo>& ci){
-    // TODO: scheduling
-    return ci->relays[0];
+    // todo: this better
+    if(!ci || ci->relays.empty()){
+        return nullptr;
+    }
+    const size_t idx = relay_rr_counter_.fetch_add(1, std::memory_order_relaxed) % ci->relays.size();
+    return ci->relays[idx];
 }
 
 
@@ -200,21 +216,13 @@ void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp
         return;
     }
 
-    // todo: do this better. better if we store the entire thdr in the packet and ask parse_thdr_incoming_packet to
-    // todo: handle that
-    if(packet->route_flag == RoutingFlag::RELAY_TO_EXIT){
-        TransitHeader thdr{};
-        if(packet->payload_bytes >= TRANSIT_HDR_SZ){
-            std::memcpy(&thdr, packet->payload.data() + packet->start_offset, TRANSIT_HDR_SZ);
-            if(thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)) [[unlikely]] {
-                handle_control_from_relay(std::move(packet), sender_endpoint);
-                return;
-            }
-        }
+    TransitHeader thdr{};
+    std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag), TRANSIT_HDR_SZ);
+    if(thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)) [[unlikely]] {
+        handle_control_from_relay(std::move(packet), sender_endpoint);
+        return;
     }
 
-    // todo: offset packet to actual data (currently inserting the whole packet)
-    // bug: ^
     insert_into_rob(std::move(packet));
 }
 
@@ -267,7 +275,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                     .circuit_id      = cid,
                     .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
                     .relays          = std::move(relays),
-                    .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(Settings::REORDER_BUFFER_SIZE, client_initial_seq)
+                    .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq)
                 });
 
                 cid_ci_umap_.put(cid, ci);
@@ -379,13 +387,32 @@ circuit_id is at the start
     std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag), TRANSIT_HDR_SZ);
 
     packet->cid = thdr.circuit_id;
-    packet->start_offset = sizeof(RoutingFlag);
-    packet->payload_bytes = packet->bytes_received - sizeof(RoutingFlag);
 
-    if(packet->bytes_received >= sizeof(RoutingFlag) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ){
-        PayloadHeader phdr{};
-        std::memcpy(&phdr, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, PAYLOAD_HDR_SZ);
-        packet->seq_id = phdr.sequence_id;
+    if(thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)){
+        packet->start_offset = sizeof(RoutingFlag) + TRANSIT_HDR_SZ;
+        packet->payload_bytes = packet->bytes_received - packet->start_offset;
+        return true;
+    }
+
+    constexpr size_t min_data_sz = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;
+    if(packet->bytes_received < min_data_sz){
+        return false;
+    }
+
+    PayloadHeader phdr{};
+    std::memcpy(&phdr, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, PAYLOAD_HDR_SZ);
+    packet->seq_id = phdr.sequence_id;
+
+    packet->start_offset = min_data_sz;
+    const size_t available_payload = packet->bytes_received - min_data_sz;
+    packet->payload_bytes = std::min(static_cast<size_t>(phdr.payload_len), available_payload);
+
+    if(packet->payload_bytes > 0){
+        const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
+        packet->ip_version_macos = (ip_ver == 6) ? htonl(AF_INET6) : htonl(AF_INET);
+    }
+    else{
+        packet->ip_version_macos = htonl(AF_INET);
     }
 
     return true;
@@ -419,15 +446,42 @@ void Exit::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet){
         return;
     }
 
-    // todo: this properly, payload bytes etc.
+    std::unique_lock<std::mutex> lock(utun_write_mtx_);
+    utun_write_queue_.push_back(std::move(packet));
+    if(!utun_writing_){
+        utun_writing_ = true;
+        do_write_utun(std::move(lock), seq_id);
+    }
+}
+
+
+void Exit::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id){
+    if(utun_write_queue_.empty()){
+        utun_writing_ = false;
+        return;
+    }
+
+    auto& pkt = utun_write_queue_.front();
+    std::array<asio::const_buffer, 2> bufs = {
+        asio::buffer(&pkt->ip_version_macos, sizeof(pkt->ip_version_macos)),
+        asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
+    };
+
+    lock.unlock();
+
     asio::async_write(
         utun_stream_,
-        asio::buffer(packet->payload.data(), packet->payload_bytes),
-        [me = shared_from_this(), pkt = std::move(packet), seq_id]
-        (const boost::system::error_code& ec, size_t /*bytes_transferred*/) mutable{
+        bufs,
+        [me = shared_from_this(), seq_id](const boost::system::error_code& ec, size_t /*bytes_transferred*/){
             if(ec){
-                LOG_ERROR(me->logger_, "Failed to write seq_id {} to utun: {}", seq_id, ec.message());
+                LOG_ERROR(me->logger_, "Failed to write to utun: {}, seq_id: {}", ec.message(), seq_id);
             }
+            std::unique_lock<std::mutex> lk(me->utun_write_mtx_);
+            if(!me->utun_write_queue_.empty()){
+                me->utun_write_queue_.pop_front();
+            }
+            me->do_write_utun(std::move(lk), seq_id+1);
         }
     );
 }
+

@@ -105,6 +105,12 @@ private:
     // from client to destination
     RCU_UMap<circuit_id_t, std::shared_ptr<CircuitInfo>> cid_ci_umap_;
 
+    // utun
+    std::mutex utun_write_mtx_;
+    std::deque<ArenaSlot<IncomingCell>> utun_write_queue_;
+    bool utun_writing_{false};
+    std::atomic<size_t> relay_rr_counter_{0};
+
 
     void start_listening_utun();
 
@@ -140,4 +146,7 @@ private:
 
 
     void write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet);
+
+
+    void do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id);
 };

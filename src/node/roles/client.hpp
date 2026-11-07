@@ -125,6 +125,11 @@ private:
 
     // incoming
     RCU_UMap<sequence_id_t, std::shared_ptr<CircuitInfo>> sid_ci_umap_;
+    // utun
+    std::mutex utun_write_mtx_;
+    std::deque<ArenaSlot<IncomingCell>> utun_write_queue_;
+    bool utun_writing_{false};
+    std::atomic<size_t> relay_rr_counter_{0};   // todo: move this to per-circuit counter
 
     quill::Logger* logger_{nullptr};
 
@@ -187,4 +192,7 @@ private:
 
 
     void write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet);
+
+
+    void do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id);
 };

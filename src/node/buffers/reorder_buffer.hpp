@@ -2,17 +2,51 @@
 
 #include <optional>
 #include <vector>
+#include <chrono>
+#include <memory>
+#include <utility>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <stdexcept>
+
+#include <boost/asio.hpp>
+
+
+namespace asio = boost::asio;
 
 
 template<typename T, typename seq_t = uint64_t>
-class ReorderBuffer{
+class ReorderBuffer : public std::enable_shared_from_this<ReorderBuffer<T, seq_t>>{
 public:
-    explicit ReorderBuffer(size_t capacity, seq_t start_seq = 0):
+    struct Settings{
+        static constexpr size_t DUPACK_THRESHOLD = 3; // standard threshold for TCP fast retransmit
+        static constexpr double WAIT_LIMIT = 0.8;
+        static constexpr size_t ESTIMATED_CIRCUIT_RTT_START = 40000;
+        static constexpr double MIN_JITTER = 5000.0;
+        static constexpr double MAX_DELAY = 40000.0;
+    };
+
+
+    using clock_t = std::chrono::steady_clock;
+    using duration_t = std::chrono::microseconds;
+
+
+    explicit ReorderBuffer(asio::io_context& ioc,
+                           size_t capacity,
+                           seq_t start_seq = 0,
+                           duration_t estimated_circuit_rtt = duration_t(Settings::ESTIMATED_CIRCUIT_RTT_START)):
+        timer_(ioc),
         buffer_(capacity),
         capacity_(capacity),
-        head_(start_seq){
+        head_(start_seq),
+        smoothed_rtt_us_(static_cast<double>(estimated_circuit_rtt.count())),
+        rtt_var_us_(smoothed_rtt_us_ / 4.0),
+        timer_active_(false){
         if(capacity == 0)
             throw std::invalid_argument("Capacity must be > 0.");
+
+        recalculate_rto_bounds();
     }
 
 
@@ -25,14 +59,16 @@ public:
         if(buffer_[index].has_value())
             return false;
 
-        buffer_[index] = std::forward<T>(item);
+        update_rtt_estimator();
+
+        buffer_[index] = std::move(item);
         return true;
     }
 
 
     template<typename Callback>
     [[nodiscard]] bool insert_try_drain(seq_t seq, T&& item, Callback&& handler){
-        if(!insert(seq, std::forward<T>(item)))
+        if(!insert(seq, std::move(item)))
             return false;
         try_drain(std::forward<Callback>(handler));
         return true;
@@ -41,17 +77,140 @@ public:
 
     template<typename Callback>
     void try_drain(Callback&& handler){
-        // todo: actual drain logic (waiting)
+        // drain all "ready" packets
         while(buffer_[head_ % capacity_].has_value()){
+            if(timer_active_){
+                boost::system::error_code ec;
+                timer_.cancel();
+                timer_active_ = false;
+            }
+
             size_t index = head_ % capacity_;
-            auto item = std::move(*buffer_[index]);
+            auto slot = std::move(*buffer_[index]);
             buffer_[index].reset();
-            handler(head_++, std::move(item));
+            handler(head_++, std::move(slot));
+        }
+
+        // check for further packets
+        size_t ahead_count = count_buffered_ahead();
+        if(ahead_count == 0){
+            return; // buffer is clean;
+        }
+
+        // fast-retransmit trigger:
+        // if 3 or more packets are buffered ahead of head_, TCP will generate 3 DupACKs anyway
+        // skip head_ to trigger fast retransmit without waiting
+        if(ahead_count >= Settings::DUPACK_THRESHOLD){
+            if(timer_active_){
+                boost::system::error_code ec;
+                timer_.cancel();
+                timer_active_ = false;
+            }
+            skip_missing_head_and_drain(std::forward<Callback>(handler));
+            return;
+        }
+
+        // start timer
+        if(!timer_active_){
+            start_rto_bounded_timer(std::forward<Callback>(handler));
         }
     }
 
+
+    void update_circuit_rtt(duration_t rtt_sample){
+        double sample = static_cast<double>(rtt_sample.count());
+        rtt_var_us_ = (0.75 * rtt_var_us_) + (0.25 * std::abs(smoothed_rtt_us_ - sample));
+        smoothed_rtt_us_ = (0.875 * smoothed_rtt_us_) + (0.125 * sample);
+        recalculate_rto_bounds();
+    }
+
+
+    [[nodiscard]] duration_t current_wait_time() const noexcept{
+        return current_wait_limit_;
+    }
+
 private:
+    asio::steady_timer timer_;
     std::vector<std::optional<T>> buffer_;
     const size_t capacity_;
     seq_t head_;
+
+    duration_t current_wait_limit_{20000};
+    clock_t::time_point last_arrival_time_;
+    double smoothed_rtt_us_;
+    double rtt_var_us_;
+
+    bool timer_active_;
+
+
+    void recalculate_rto_bounds(){
+        // TCP Estimated RTO = SRTT + 4 * RTTVAR
+        double estimated_rto = smoothed_rtt_us_ + (4.0 * rtt_var_us_);
+
+        // wait limit set to 80% of TCP RTO (less than TCP RTO to prevent stalls)
+        // clamped between 5ms (min jitter) and 40ms (max overlay delay)
+        double target_wait = std::clamp(estimated_rto * Settings::WAIT_LIMIT, Settings::MIN_JITTER, Settings::MAX_DELAY);
+        current_wait_limit_ = duration_t(static_cast<int64_t>(target_wait));
+    }
+
+
+    void update_rtt_estimator(){
+        auto now = clock_t::now();
+        if(last_arrival_time_.time_since_epoch().count() != 0){
+            auto delta_us = std::chrono::duration_cast<std::chrono::microseconds>(now - last_arrival_time_).count();
+            update_circuit_rtt(duration_t(delta_us));
+        }
+        last_arrival_time_ = now;
+    }
+
+
+    [[nodiscard]] size_t count_buffered_ahead() const noexcept{
+        size_t count = 0;
+        for(size_t offset = 1; offset < capacity_; ++offset){
+            if(buffer_[(head_ + offset) % capacity_].has_value()){
+                count++;
+            }
+        }
+        return count;
+    }
+
+
+    template<typename Callback>
+    void skip_missing_head_and_drain(Callback&& handler){
+        size_t skipped = 0;
+        while(!buffer_[head_ % capacity_].has_value() && skipped < capacity_){
+            ++head_;
+            skipped++;
+        }
+
+        try_drain(std::forward<Callback>(handler));
+    }
+
+
+    template<typename Callback>
+    void start_rto_bounded_timer(Callback handler){
+        timer_active_ = true;
+        timer_.expires_after(current_wait_limit_);
+
+        timer_.async_wait([self = this->shared_from_this(), handler = std::move(handler)](const boost::system::error_code& ec) mutable{
+            if(ec){
+                // timer canceled mostly
+                return;
+            }
+
+            self->timer_active_ = false;
+
+            self->skip_missing_head_and_drain(std::move(handler));
+        });
+    }
+
+
+    [[nodiscard]] size_t find_first_buffered_offset() const noexcept{
+        for(size_t offset = 1; offset < capacity_; ++offset){
+            if(buffer_[(head_ + offset) % capacity_].has_value()){
+                return offset;
+            }
+        }
+        return 0;
+    }
 };
