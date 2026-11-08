@@ -61,7 +61,7 @@ private:
     void handle_control_from_client(session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint);
 
 
-    static std::vector<uint8_t> make_relay_setup_exit_res_packet(session_id_t sid, const ControlHeader& chdr, const RelaySetupExitRes& res)
+    static std::vector<uint8_t> make_relay_setup_exit_res_packet(session_id_t sid, const ControlHeader& chdr, const RelaySetupExitRes& res);
 
 
     void forward_to_exit(ArenaSlot<IncomingCell> packet);

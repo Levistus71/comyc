@@ -136,8 +136,6 @@ public:
         // todo: change this
         static constexpr std::string BOOTSTRAP_IP = "8.8.8.8";
         static constexpr int BOOTSTRAP_PORT = 6969;
-
-
     };
 
 
@@ -207,8 +205,10 @@ private:
 
         return asio::async_initiate<CompletionToken, Signature>(
             [txn_id, relays_info_glb](auto handler){
-                auto unbound_handler = [h = std::move(handler)](boost::system::error_code ec, std::vector<uint8_t> data) mutable{
-                    h(ec, std::move(data));
+                auto h_ptr = std::make_shared<decltype(handler)>(std::move(handler));
+
+                auto unbound_handler = [h_ptr](boost::system::error_code ec, std::vector<uint8_t> data) {
+                    (*h_ptr)(ec, std::move(data));
                 };
 
                 std::mutex& mtx = relays_info_glb->registry_mutex_;

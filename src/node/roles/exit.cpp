@@ -105,7 +105,7 @@ void Exit::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr){
         const SrcAddrNetworkTuple sant{
-            .e_client_addr = nt.e_client_addr
+            .e_client_addr = nt.e_client_addr()
         };
         ci = sant_ci_umap_.get(sant);
 
@@ -275,7 +275,10 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                     .circuit_id      = cid,
                     .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
                     .relays          = std::move(relays),
-                    .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq)
+                    .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq),
+                    /* not used by exit, compiler warns */
+                    .nt = NetworkTuple::create_exit_nt(asio::ip::address{}, asio::ip::address{}, 0, 0),
+                    .activity_counter = {}
                 });
 
                 cid_ci_umap_.put(cid, ci);

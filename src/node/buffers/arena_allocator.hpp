@@ -140,7 +140,7 @@ public:
     }
 
 
-    [[nodiscard]] T* release() noexcept{
+    T* release() noexcept{
         T* temp = ptr_;
         ptr_ = nullptr;
         return temp;

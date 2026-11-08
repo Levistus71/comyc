@@ -80,7 +80,6 @@ public:
         // drain all "ready" packets
         while(buffer_[head_ % capacity_].has_value()){
             if(timer_active_){
-                boost::system::error_code ec;
                 timer_.cancel();
                 timer_active_ = false;
             }

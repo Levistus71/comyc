@@ -93,8 +93,12 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
     if(relay_ != nullptr)
         relay_->start();
 
-    if(exit_ != nullptr)
-        exit_->start();
+    if(exit_ != nullptr){
+        if(!exit_->start()){
+            LOG_ERROR(logger_, "Exit not started.");
+            co_return false;
+        }
+    }
 
     co_return true;
 }

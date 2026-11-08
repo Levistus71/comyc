@@ -200,7 +200,8 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
             .circuit_id   = ci->circuit_id,
             .frame_len    = 1,
             .flags        = 0,
-            .payload_tier = PayloadTier::TIER_1024
+            .payload_tier = PayloadTier::TIER_1024,
+            ._reserved_   = {}
         },
         .phdr{
             .sequence_id = seq_id,
@@ -400,7 +401,7 @@ void Client::stop(){
 asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     if(nt.has_value()){
         LOG_INFO(logger_, "Starting making new circuit, requested by: {}", nt.value().to_string());
-        if(nt->c_dest_addr.is_v6()){
+        if(nt->c_dest_addr().is_v6()){
             LOG_INFO(logger_, "Requested destination ip is ipv6, can't make new circuit. aborting.");
             co_return false;
         }
@@ -492,7 +493,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     if(nt.has_value()){
         // not default circuit
         create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays,
-                                                   default_vpn_v4_, nt->c_src_port, nt->c_dest_addr.to_v4(), nt->c_dest_port, false);
+                                                   default_vpn_v4_, nt->c_src_port(), nt->c_dest_addr().to_v4(), nt->c_dest_port(), false);
     }
     else{
         // default circuit
@@ -659,6 +660,7 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) co
 
 void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
     auto circuit_info = sid_ci_umap_.get(packet->sid);
+    circuit_info->touch(shared_from_this());
     if(!circuit_info){
         LOG_WARNING(logger_, "Recieved incoming packet with unknown sid: {}, cid: {}", packet->sid, packet->cid);
         return;

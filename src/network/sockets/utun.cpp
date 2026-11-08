@@ -269,7 +269,7 @@ int Utun::get_fd() const{
 
 
 [[nodiscard]] bool Utun::configure_utun_v6(const asio::ip::address_v6& local_ip,
-                                           const asio::ip::address_v6& remote_ip,
+                                           [[maybe_unused]] const asio::ip::address_v6& remote_ip,
                                            const int prefix_len) const{
     const int sock = ::socket(AF_INET6, SOCK_DGRAM, 0);
     if(sock < 0){
@@ -315,7 +315,7 @@ int Utun::get_fd() const{
     const int x = ::ioctl(sock, SIOCAIFADDR_IN6, &ifra);
     if(x < 0){
         const int err = errno;
-        LOG_ERROR(logger_, "[UTUN] ioctl() fail. err: {}", errno);
+        LOG_ERROR(logger_, "[UTUN] ioctl() fail. err: {}", err);
     }
     ::close(sock);
     return x >= 0;

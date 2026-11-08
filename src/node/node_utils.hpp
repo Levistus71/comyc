@@ -231,101 +231,156 @@ void RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::erase(const Key& key){
 }
 
 
-struct NetworkTuple {
-    union {
-        struct {
-            asio::ip::address c_src_addr;
-            asio::ip::address c_dest_addr;
+struct NetworkTuple{
+    struct ClientView{
+        asio::ip::address c_src_addr;
+        asio::ip::address c_dest_addr;
 
-            uint16_t c_src_port;
-            uint16_t c_dest_port;
-        };
-
-        struct {
-            asio::ip::address e_dest_addr;
-            asio::ip::address e_client_addr;
-
-            uint16_t e_dest_port;
-            uint16_t e_client_port;
-        };
+        uint16_t c_src_port;
+        uint16_t c_dest_port;
     };
+
+
+    struct ExitView{
+        asio::ip::address e_dest_addr;
+        asio::ip::address e_client_addr;
+
+        uint16_t e_dest_port;
+        uint16_t e_client_port;
+    };
+
+
+    union{
+        ClientView client;
+        ExitView exit;
+    };
+
+
+    [[nodiscard]] const asio::ip::address& c_src_addr() const{
+        return client.c_src_addr;
+    }
+
+
+    [[nodiscard]] const asio::ip::address& c_dest_addr() const{
+        return client.c_dest_addr;
+    }
+
+
+    [[nodiscard]] uint16_t c_src_port() const{
+        return client.c_src_port;
+    }
+
+
+    [[nodiscard]] uint16_t c_dest_port() const{
+        return client.c_dest_port;
+    }
+
+
+    [[nodiscard]] const asio::ip::address& e_dest_addr() const{
+        return exit.e_dest_addr;
+    }
+
+
+    [[nodiscard]] const asio::ip::address& e_client_addr() const{
+        return exit.e_client_addr;
+    }
+
+
+    [[nodiscard]] uint16_t e_dest_port() const{
+        return exit.e_dest_port;
+    }
+
+
+    [[nodiscard]] uint16_t e_client_port() const{
+        return exit.e_client_port;
+    }
+
 
     NetworkTuple() = delete;
 
-    ~NetworkTuple() {
-        c_src_addr.~address();
-        c_dest_addr.~address();
+
+    ~NetworkTuple(){
+        client.c_src_addr.~address();
+        client.c_dest_addr.~address();
     }
 
-    NetworkTuple(const NetworkTuple& other) // NOLINT(cppcoreguidelines-pro-type-member-init)
-        : c_src_port(other.c_src_port),
-          c_dest_port(other.c_dest_port) {
-        ::new (static_cast<void*>(&c_src_addr)) asio::ip::address(other.c_src_addr);
-        ::new (static_cast<void*>(&c_dest_addr)) asio::ip::address(other.c_dest_addr);
+
+    NetworkTuple(const NetworkTuple& other){
+        client.c_src_port = other.client.c_src_port;
+        client.c_dest_port = other.client.c_dest_port;
+        ::new(static_cast<void*>(&client.c_src_addr)) asio::ip::address(other.client.c_src_addr);
+        ::new(static_cast<void*>(&client.c_dest_addr)) asio::ip::address(other.client.c_dest_addr);
     }
 
-    NetworkTuple& operator=(const NetworkTuple& other) {
-        if (this != &other) {
-            c_src_addr = other.c_src_addr;
-            c_dest_addr = other.c_dest_addr;
-            c_src_port = other.c_src_port;
-            c_dest_port = other.c_dest_port;
+
+    NetworkTuple& operator=(const NetworkTuple& other){
+        if(this != &other){
+            client.c_src_addr = other.client.c_src_addr;
+            client.c_dest_addr = other.client.c_dest_addr;
+            client.c_src_port = other.client.c_src_port;
+            client.c_dest_port = other.client.c_dest_port;
         }
         return *this;
     }
 
-    NetworkTuple(NetworkTuple&& other) noexcept // NOLINT(cppcoreguidelines-pro-type-member-init)
-        : c_src_port(other.c_src_port),
-          c_dest_port(other.c_dest_port) {
-        ::new (static_cast<void*>(&c_src_addr)) asio::ip::address(std::move(other.c_src_addr));
-        ::new (static_cast<void*>(&c_dest_addr)) asio::ip::address(std::move(other.c_dest_addr));
+
+    NetworkTuple(NetworkTuple&& other) noexcept{
+        client.c_src_port = other.client.c_src_port;
+        client.c_dest_port = other.client.c_dest_port;
+        ::new(static_cast<void*>(&client.c_src_addr)) asio::ip::address(std::move(other.client.c_src_addr));
+        ::new(static_cast<void*>(&client.c_dest_addr)) asio::ip::address(std::move(other.client.c_dest_addr));
     }
 
-    NetworkTuple& operator=(NetworkTuple&& other) noexcept {
-        if (this != &other) {
-            c_src_addr = std::move(other.c_src_addr);
-            c_dest_addr = std::move(other.c_dest_addr);
-            c_src_port = other.c_src_port;
-            c_dest_port = other.c_dest_port;
+
+    NetworkTuple& operator=(NetworkTuple&& other) noexcept{
+        if(this != &other){
+            client.c_src_addr = std::move(other.client.c_src_addr);
+            client.c_dest_addr = std::move(other.client.c_dest_addr);
+            client.c_src_port = other.client.c_src_port;
+            client.c_dest_port = other.client.c_dest_port;
         }
         return *this;
     }
+
 
     static NetworkTuple create_client_nt(asio::ip::address src_addr,
                                          asio::ip::address dest_addr,
                                          const uint16_t src_port,
-                                         const uint16_t dest_port) {
+                                         const uint16_t dest_port){
         return {std::move(src_addr), std::move(dest_addr), src_port, dest_port};
     }
+
 
     static NetworkTuple create_exit_nt(asio::ip::address client_addr,
                                        asio::ip::address dest_addr,
                                        const uint16_t client_port,
-                                       const uint16_t dest_port) {
+                                       const uint16_t dest_port){
         return {std::move(dest_addr), std::move(client_addr), dest_port, client_port};
     }
 
-    bool operator==(const NetworkTuple& other) const {
-        return (c_src_addr == other.c_src_addr) &&
-               (c_dest_addr == other.c_dest_addr) &&
-               (c_src_port == other.c_src_port) &&
-               (c_dest_port == other.c_dest_port);
+
+    bool operator==(const NetworkTuple& other) const{
+        return (client.c_src_addr == other.client.c_src_addr) &&
+               (client.c_dest_addr == other.client.c_dest_addr) &&
+               (client.c_src_port == other.client.c_src_port) &&
+               (client.c_dest_port == other.client.c_dest_port);
     }
 
-    [[nodiscard]] std::string to_string() const {
-        return c_src_addr.to_string() + ":" + std::to_string(c_src_port) + " -> " +
-               c_dest_addr.to_string() + ":" + std::to_string(c_dest_port);
+
+    [[nodiscard]] std::string to_string() const{
+        return client.c_src_addr.to_string() + ":" + std::to_string(client.c_src_port) + " -> " +
+               client.c_dest_addr.to_string() + ":" + std::to_string(client.c_dest_port);
     }
 
 private:
     NetworkTuple(asio::ip::address src_addr, // NOLINT(cppcoreguidelines-pro-type-member-init)
                  asio::ip::address dest_addr,
                  uint16_t src_port,
-                 uint16_t dest_port)
-        : c_src_port(src_port),
-          c_dest_port(dest_port) {
-        ::new (static_cast<void*>(&c_src_addr)) asio::ip::address(std::move(src_addr));
-        ::new (static_cast<void*>(&c_dest_addr)) asio::ip::address(std::move(dest_addr));
+                 uint16_t dest_port){
+        client.c_src_port = src_port;
+        client.c_dest_port = dest_port;
+        ::new(static_cast<void*>(&client.c_src_addr)) asio::ip::address(std::move(src_addr));
+        ::new(static_cast<void*>(&client.c_dest_addr)) asio::ip::address(std::move(dest_addr));
     }
 };
 
@@ -335,11 +390,11 @@ struct std::hash<NetworkTuple>{
     std::size_t operator()(const NetworkTuple& tuple) const noexcept{
         std::size_t seed = 0;
 
-        boost::hash_combine(seed, std::hash<std::string>{}(tuple.c_src_addr.to_string()));
-        boost::hash_combine(seed, std::hash<std::string>{}(tuple.c_dest_addr.to_string()));
+        boost::hash_combine(seed, std::hash<std::string>{}(tuple.c_src_addr().to_string()));
+        boost::hash_combine(seed, std::hash<std::string>{}(tuple.c_dest_addr().to_string()));
 
-        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.c_src_port));
-        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.c_dest_port));
+        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.c_src_port()));
+        boost::hash_combine(seed, std::hash<uint16_t>{}(tuple.c_dest_port()));
 
         return seed;
     }
@@ -381,7 +436,7 @@ struct RelayInfo{
         std::stringstream ss;
         ss << "RelayInfo{";
 
-        if(session_id == -1){
+        if(session_id == static_cast<session_id_t>(-1)){
             ss << "status: not connected";
         }
         else{
