@@ -1,14 +1,15 @@
+#include "src/node/cli.hpp"
 #include "src/node/node.hpp"
 
 #include <quill/Backend.h>
 #include <quill/Frontend.h>
-#include "quill/sinks/FileSink.h"
 #include <quill/LogMacros.h>
+#include "quill/sinks/FileSink.h"
 
 
-static void setup_loggers(){
+static void setup_loggers(const std::string& log_file){
     auto file_sink = quill::Frontend::create_or_get_sink<quill::FileSink>(
-        "logs.txt",
+        log_file,
         [](){
             quill::FileSinkConfig cfg;
             cfg.set_open_mode('w');
@@ -19,47 +20,43 @@ static void setup_loggers(){
 
     quill::Frontend::create_or_get_logger(
         "client_logger",
-        std::move(file_sink),
+        file_sink,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Client] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
 
-    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "relay_logger",
-        std::move(file_sink),
+        file_sink,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Relay] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
 
-    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "exit_logger",
-        std::move(file_sink),
+        file_sink,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Exit] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
 
-    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "main_logger",
-        std::move(file_sink),
+        file_sink,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Main] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
         }
     );
 
-    file_sink = quill::Frontend::get_sink("logs.txt");
     quill::Frontend::create_or_get_logger(
         "node_logger",
-        std::move(file_sink),
+        file_sink,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Node] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
@@ -70,17 +67,32 @@ static void setup_loggers(){
 }
 
 
-int main(){
+int main(const int argc, char* argv[]){
+    auto cli_opts = cli::CliParser::parse(argc, argv);
+    if(!cli_opts){
+        return 1;
+    }
+    if(cli_opts->show_help){
+        cli::CliParser::print_help(argv[0] ? argv[0] : "node");
+        return 0;
+    }
+    if(cli_opts->show_version){
+        cli::CliParser::print_version();
+        return 0;
+    }
+
     // quill
-    setup_loggers();
+    setup_loggers(cli_opts->log_file);
     auto main_logger = quill::Frontend::get_logger("main_logger");
+    LOG_INFO(main_logger, "Starting node with role: {}, threads: {}, log_file: {}",
+             cli::CliParser::role_to_string(cli_opts->role),
+             cli_opts->thread_count,
+             cli_opts->log_file);
 
     asio::io_context ioc;
     auto work_guard = asio::make_work_guard(ioc);
 
-    // todo: role should be decided dynamically (cli)
-    constexpr auto role = NodeRole::CLIENT_RELAY;
-    const auto node = std::make_shared<Node>(ioc, role);
+    const auto node = std::make_shared<Node>(ioc, cli_opts->role);
 
     auto shutdown = [&]() {
         LOG_INFO(main_logger, "Stopping node and releasing work guard.");
@@ -121,7 +133,7 @@ int main(){
     });
 
     // thread_pool
-    const size_t thread_count = std::max(1u, std::thread::hardware_concurrency());
+    const size_t thread_count = cli_opts->thread_count;
     std::vector<std::thread> threads;
     threads.reserve(thread_count - 1);
 
