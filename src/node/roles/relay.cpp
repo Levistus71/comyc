@@ -22,8 +22,8 @@ Relay::Relay(asio::io_context& ioc,
 Relay::~Relay() = default;
 
 
-void Relay::start(){
-    // todo: actual start up idk what to do here
+void Relay::start() const{
+    LOG_INFO(logger_, "Relay starting.");
 }
 
 

@@ -36,7 +36,7 @@ public:
     ~Relay();
 
 
-    void start();
+    void start() const;
 
 
     void stop();

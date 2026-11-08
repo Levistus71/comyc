@@ -473,7 +473,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         if(added_relays >= Settings::DEFAULT_NUM_ENTRY_RELAYS)
             break;
     }
-    if(added_relays <= Settings::DEFAULT_NUM_ENTRY_RELAYS){
+    if(added_relays < Settings::DEFAULT_NUM_ENTRY_RELAYS){
         LOG_INFO(logger_, "Couldn't make new circuit, num of relays accepted : {} out of required {}",
                  added_relays,
                  Settings::DEFAULT_NUM_ENTRY_RELAYS

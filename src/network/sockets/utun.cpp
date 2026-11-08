@@ -37,18 +37,18 @@
 #include <sstream>
 
 namespace{
-    struct in6_rtreq {
-        struct in6_addr rtmsg_dst;
-        struct in6_addr rtmsg_src;
-        struct in6_addr rtmsg_gateway;
-        uint32_t        rtmsg_type;
-        uint16_t        rtmsg_dst_len;
-        uint16_t        rtmsg_src_len;
-        uint32_t        rtmsg_metric;
-        unsigned long   rtmsg_info;
-        uint32_t        rtmsg_flags;
-        int             rtmsg_ifindex;
-    };
+struct in6_rtreq{
+    struct in6_addr rtmsg_dst;
+    struct in6_addr rtmsg_src;
+    struct in6_addr rtmsg_gateway;
+    uint32_t rtmsg_type;
+    uint16_t rtmsg_dst_len;
+    uint16_t rtmsg_src_len;
+    uint32_t rtmsg_metric;
+    unsigned long rtmsg_info;
+    uint32_t rtmsg_flags;
+    int rtmsg_ifindex;
+};
 }
 
 #endif
@@ -150,7 +150,6 @@ void Utun::stop(){
         else
             LOG_INFO(logger_, "[UTUN] default gateway ipv4 found, presuming {}", default_gateway_ipv6_.to_string());
     }
-
 
 
     /*
@@ -832,7 +831,6 @@ std::optional<asio::ip::address_v6> Utun::get_default_gateway_v6(){
 [[nodiscard]] bool Utun::add_del_route(const bool add,
                                        const asio::ip::address& dest,
                                        const asio::ip::address& netmaskv4_prefixv6){
-
     const auto gateway = dest.is_v4() ? default_gateway_ipv4_ : default_gateway_ipv6_;
 
     std::lock_guard<std::mutex> lock(route_update_mutex_);

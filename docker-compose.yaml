@@ -1,0 +1,103 @@
+services:
+  bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: comyc-node:latest
+    container_name: comyc-bootstrap
+    command: ["node", "-r", "relay", "-p", "6969", "-c"]
+    networks:
+      comyc-net:
+        ipv4_address: 10.10.0.10
+    restart: unless-stopped
+
+  relay-1:
+    image: comyc-node:latest
+    container_name: comyc-relay-1
+    depends_on:
+      - bootstrap
+    command: ["node", "-r", "relay", "-p", "7001", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
+    networks:
+      comyc-net:
+        ipv4_address: 10.20.0.11
+    restart: unless-stopped
+
+  relay-2:
+    image: comyc-node:latest
+    container_name: comyc-relay-2
+    depends_on:
+      - bootstrap
+    command: ["node", "-r", "relay", "-p", "7002", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
+    networks:
+      comyc-net:
+        ipv4_address: 10.30.0.12
+    restart: unless-stopped
+
+  relay-3:
+    image: comyc-node:latest
+    container_name: comyc-relay-3
+    depends_on:
+      - bootstrap
+    command: [ "node", "-r", "relay", "-p", "7003", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c" ]
+    networks:
+      comyc-net:
+        ipv4_address: 10.40.0.12
+    restart: unless-stopped
+
+  relay-4:
+    image: comyc-node:latest
+    container_name: comyc-relay-3
+    depends_on:
+      - bootstrap
+    command: [ "node", "-r", "relay", "-p", "7004", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c" ]
+    networks:
+      comyc-net:
+        ipv4_address: 10.50.0.12
+    restart: unless-stopped
+
+  exit:
+    image: comyc-node:latest
+    container_name: comyc-exit
+    depends_on:
+      - bootstrap
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    command: ["node", "-r", "exit", "-p", "8001", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
+    networks:
+      comyc-net:
+        ipv4_address: 10.40.0.20
+    restart: unless-stopped
+
+
+  client:
+    image: comyc-node:latest
+    container_name: comyc-client
+    depends_on:
+      - bootstrap
+      - relay-1
+      - relay-2
+      - relay-3
+      - relay-4
+      - exit
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: ["node", "-r", "client", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
+    networks:
+      comyc-net:
+        ipv4_address: 10.50.0.30
+    restart: unless-stopped
+
+networks:
+  comyc-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.0.0.0/8
+          gateway: 10.0.0.1

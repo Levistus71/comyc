@@ -71,6 +71,7 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
     listenv6(std::move(first_packetv6));
 
     if(relays_info_glb_){
+        // todo: if this is the bootstrap node, skip this
         if(CommError e = co_await establish_connection(bootstrap_node_, udp_socketv4_, relays_info_glb_); e){
             LOG_ERROR(logger_, "failed to talk to bill turner (bootstrap): {}", e.what());
             co_return false;
