@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_set>
 
@@ -151,13 +153,6 @@ private:
 
     static std::optional<asio::ip::address> get_default_gateway_v4();
 
+
     static std::optional<asio::ip::address_v6> get_default_gateway_v6();
 };
-
-
-/*
-    asio::ip::address_v4 dummy_local_ipv4 = asio::ip::make_address_v4("10.8.0.2"),
-    asio::ip::address_v4 dummy_gateway_ipv4 = asio::ip::make_address_v4("10.8.0.1"),
-    asio::ip::address_v6 dummy_local_ipv6 = asio::ip::make_address_v6(""),
-    asio::ip::address_v6 dummy_gateway_ipv6 = asio::ip::make_address_v6("fd00::1")
- */

@@ -48,7 +48,7 @@ add_compile_definitions(
 )
 
 
-find_package(Boost REQUIRED COMPONENTS headers system)
+find_package(Boost REQUIRED COMPONENTS headers)
 find_package(quill REQUIRED)
 find_package(Threads REQUIRED)
 
