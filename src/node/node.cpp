@@ -1,6 +1,3 @@
-#include "node.hpp"
-#include "node.hpp"
-#include "node.hpp"
 #include "src/node/node.hpp"
 #include "src/network/comms/control.hpp"
 
@@ -15,15 +12,18 @@
 #include "quill/Frontend.h"
 
 
-Node::Node(asio::io_context& ioc, const NodeRole role):
-    role_(role),
+Node::Node(asio::io_context& ioc, const cli::CliOptions& options):
+    role_(options.role),
     ioc_(ioc),
     incoming_cell_pool_(Settings::ARENA_POOL_SIZE, "node_logger"){
     udp_socketv4_ = std::make_shared<asio::ip::udp::socket>(ioc_);
     udp_socketv6_ = std::make_shared<asio::ip::udp::socket>(ioc_);
     logger_ = quill::Frontend::get_logger("node_logger");
 
-    bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address(Settings::BOOTSTRAP_IP), Settings::BOOTSTRAP_PORT);
+    if(options.specified_bootstrap)
+        bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address(options.bootstrap_ip), options.bootstrap_port);
+    else
+        bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address(Settings::BOOTSTRAP_IP), Settings::BOOTSTRAP_PORT);
 
     sender_endpoint_ = std::make_shared<asio::ip::udp::endpoint>();
 
@@ -45,7 +45,7 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
 }
 
 
-[[nodiscard]] asio::awaitable<bool> Node::start(){
+[[nodiscard]] asio::awaitable<bool> Node::start(const cli::CliOptions& options){
     if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
         LOG_ERROR(logger_, "start() called when running_.");
         co_return false;
@@ -71,21 +71,25 @@ Node::Node(asio::io_context& ioc, const NodeRole role):
     listenv6(std::move(first_packetv6));
 
     if(relays_info_glb_){
-        // todo: if this is the bootstrap node, skip this
-        if(CommError e = co_await establish_connection(bootstrap_node_, udp_socketv4_, relays_info_glb_); e){
-            LOG_ERROR(logger_, "failed to talk to bill turner (bootstrap): {}", e.what());
-            co_return false;
+        if(options.bootstrap_node){
+            LOG_INFO(logger_, "I'm Bootstrap Bill, skipping establish_connection...");
         }
-        co_await populate_relays(relays_info_glb_, bootstrap_node_, udp_socketv4_);
-
-        if(relays_info_glb_->usable_relays.empty()){
-            LOG_ERROR(logger_, "failed to populate usable_relay list. all_relay count: {}", relays_info_glb_->all_relays.size());
-            co_return false;
+        else{
+            if(CommError e = co_await establish_connection(bootstrap_node_, udp_socketv4_, relays_info_glb_, logger_); e){
+                LOG_ERROR(logger_, "failed to talk to Bill Turner (bootstrap): {}", e.what());
+                co_return false;
+            }
+            co_await populate_relays(relays_info_glb_, bootstrap_node_, udp_socketv4_, logger_);
         }
     }
 
     if(client_ != nullptr){
-        if(!co_await client_->start()){
+        if(relays_info_glb_->usable_relays.empty()){
+            LOG_ERROR(logger_, "cannot start client:");
+            LOG_ERROR(logger_, "failed to populate usable_relay list. all_relay count: {}", relays_info_glb_->all_relays.size());
+            co_return false;
+        }
+        if(!co_await client_->start(options.hijack_utun)){
             LOG_ERROR(logger_, "Client not started.");
             co_return false;
         }
@@ -136,7 +140,8 @@ void Node::stop(){
 
 asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInfoGlb> known_relays,
                                                        RelayInfo start_relay,
-                                                       std::shared_ptr<asio::ip::udp::socket> udp_sockv4){
+                                                       std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
+                                                       quill::Logger* logger){
     if(!known_relays)
         co_return CommError(true, "known_relays is nullptr");
     if(start_relay.session_id == std::numeric_limits<session_id_t>::max())
@@ -163,14 +168,14 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
         if(current.endpoint.protocol() == asio::ip::udp::v6())
             continue;
 
-        if(co_await establish_connection(current, udp_sockv4, known_relays))
+        if(co_await establish_connection(current, udp_sockv4, known_relays, logger))
             continue;
 
         if(!known_relays->usable_relays.contains(current) && is_relay_diverse(current.endpoint, known_relays->usable_relays)){
             known_relays->usable_relays.insert(current);
         }
 
-        std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays);
+        std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays, logger);
 
         // randomize
         std::ranges::shuffle(relay_list, rng);
@@ -293,7 +298,8 @@ std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay, txn_
 
 asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& relay,
                                                                  std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
-                                                                 std::shared_ptr<RelaysInfoGlb> relays_info_glb){
+                                                                 std::shared_ptr<RelaysInfoGlb> relays_info_glb,
+                                                                 quill::Logger* logger){
     std::vector<RelayInfo> result_relays;
     if(relay.session_id == static_cast<session_id_t>(-1) || !udp_sockv4 || !relays_info_glb){
         co_return result_relays;
@@ -302,10 +308,10 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
     txn_id_t txn_id = RandomGen::gen_txn_id();
     auto request_packet = make_request_relay_list_packet(relay, txn_id);
 
-    auto timeout = udp_comms_config::start_timeout;
+    auto timeout = UDP_Comms_Settings::start_timeout;
     auto executor = co_await asio::this_coro::executor;
 
-    auto response = co_await control_send_and_wait_udp(udp_sockv4, request_packet, relay.endpoint, txn_id, relays_info_glb);
+    auto response = co_await control_send_and_wait_udp(udp_sockv4, request_packet, relay.endpoint, txn_id, relays_info_glb, logger);
 
     if(std::holds_alternative<std::vector<uint8_t>>(response)){
         // client::process_incoming_packet already parsed the raw packet. we just get the response body.
@@ -332,25 +338,31 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
 
 asio::awaitable<Node::CommError> Node::establish_connection(RelayInfo relay,
                                                             std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
-                                                            std::shared_ptr<RelaysInfoGlb> relays_info_glb){
+                                                            std::shared_ptr<RelaysInfoGlb> relays_info_glb,
+                                                            quill::Logger* logger){
     // fixme: ipv6
     if(relay.endpoint.protocol() == asio::ip::udp::v6())
         co_return CommError(true, "relay.endpoint is of type ipv6");
+
+    LOG_INFO(logger, "starting establishing connection");
 
     relay.session_id = RandomGen::gen_session_id();
     const txn_id_t txn_id = RandomGen::gen_txn_id();
 
     const auto packet = make_connection_packet(relay, txn_id);
 
-    auto res = co_await control_send_and_wait_udp(udp_sockv4, packet, relay.endpoint, txn_id, relays_info_glb);
+    LOG_INFO(logger, "trying to connect via udp, max attempts : {}", UDP_Comms_Settings::max_attempts);
+    auto res = co_await control_send_and_wait_udp(udp_sockv4, packet, relay.endpoint, txn_id, relays_info_glb, logger);
 
     if(std::holds_alternative<std::vector<uint8_t>>(res)){
+        LOG_INFO(logger, "established connection");
         auto response = std::get<std::vector<uint8_t>>(std::move(res));
         // todo: process payload (encryption mostly)
         // client::process_incoming_packet already parsed the raw packet. we just get the response body.
         co_return false;
     }
 
+    LOG_INFO(logger, "establish connection failed.");
     co_return std::get<CommError>(res);
 }
 
@@ -359,9 +371,10 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
                                                                      std::vector<uint8_t> packet,
                                                                      asio::ip::udp::endpoint endpoint,
                                                                      txn_id_t txn_id,
-                                                                     std::shared_ptr<RelaysInfoGlb> relays_info_glb){
+                                                                     std::shared_ptr<RelaysInfoGlb> relays_info_glb,
+                                                                     quill::Logger* logger){
     auto executor = co_await asio::this_coro::executor;
-    auto timeout = udp_comms_config::start_timeout;
+    auto timeout = UDP_Comms_Settings::start_timeout;
 
     struct RAII_cleanup{
         std::shared_ptr<RelaysInfoGlb> info;
@@ -376,9 +389,10 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
         }
     } cleanup{relays_info_glb, txn_id};
 
-    for(size_t attempt = 1; attempt <= udp_comms_config::max_attempts; attempt++){
+    for(size_t attempt = 1; attempt <= UDP_Comms_Settings::max_attempts; attempt++){
         try{
             co_await udp_sockv4->async_send_to(asio::buffer(packet), endpoint, asio::use_awaitable);
+            LOG_INFO(logger, "sent packet number {}, txn_id%10000: {}, waiting for response", attempt, txn_id%10000);
 
             asio::steady_timer timer(executor, timeout);
 
@@ -392,11 +406,13 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
             );
 
             if(result.index() == 0){
+                LOG_INFO(logger, "received response from packet number {}, txn_id%10000 {}", attempt, txn_id%10000);
                 timer.cancel();
                 auto response_packet = std::get<0>(std::move(result));
                 co_return response_packet;
             }
 
+            LOG_INFO(logger, "timer's up,  didn't receive response, packet number {}, txn_id%10000 {}", attempt, txn_id%10000);
             auto& mut = relays_info_glb->registry_mutex_;
             std::lock_guard<std::mutex> lock(mut);
             relays_info_glb->pending_requests_.erase(txn_id);
@@ -408,6 +424,7 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
         timeout *= 2;
     }
 
+    LOG_INFO(logger, "couldn't receive response, max attempts reached.");
     co_return CommError(true, "didn't receive response, max attempts reached");
 }
 
@@ -460,6 +477,8 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
     }
     packet->route_flag = static_cast<RoutingFlag>(packet->payload[0]);
 
+    LOG_DEBUG(logger_, "Recieved packet.");
+
     switch(packet->route_flag){
         case RoutingFlag::CLIENT_TO_RELAY: {
             if(relay_)
@@ -492,19 +511,20 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
 void Node::resume_control_operation(txn_id_t txn_id,
                                     std::vector<uint8_t> payload,
                                     std::shared_ptr<RelaysInfoGlb> relays_info_glb){
-    RelaysInfoGlb::ResponseHandler handler;
+    RelaysInfoGlb::ResponseHandler our_handler;
     {
         auto& mut = relays_info_glb->registry_mutex_;
         std::lock_guard<std::mutex> lock(mut);
         auto it = relays_info_glb->pending_requests_.find(txn_id);
         if(it != relays_info_glb->pending_requests_.end()){
-            handler = std::move(it->second);
+            our_handler = std::move(it->second);
             relays_info_glb->pending_requests_.erase(it);
         }
     }
 
-    if(handler){
-        // executing this handler resumes the waiting coroutine
-        handler(boost::system::error_code{}, std::move(payload));
+    if(our_handler){
+        // executing this our_handler resumes the waiting coroutine (which was put there by
+        // async_wait_for_response (node.hpp)
+        our_handler(boost::system::error_code{}, std::move(payload));
     }
 }

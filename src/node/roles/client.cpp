@@ -77,7 +77,7 @@ Client::~Client(){
 }
 
 
-[[nodiscard]] asio::awaitable<bool> Client::start(){
+[[nodiscard]] asio::awaitable<bool> Client::start(bool hijack_system_traffic){
     if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
         LOG_ERROR(logger_, "Called start() more than once.");
         co_return false;
@@ -100,11 +100,15 @@ Client::~Client(){
         co_return false;
     }
 
-    if(!utun_.start(true, default_vpn_v4_, default_vpn_v6_)){
+    if(!utun_.start(hijack_system_traffic, default_vpn_v4_, default_vpn_v6_)){
         LOG_ERROR(logger_, "Failed to start utun.");
         co_return false;
     }
     LOG_INFO(logger_, "[UTUN] Started successfully.");
+
+    if(!hijack_system_traffic){
+        simulate_system_traffic();
+    }
 
     utun_sockfd_ = utun_.get_fd();
 
@@ -443,7 +447,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
             LOG_INFO(logger_, "Trying to setup exit info with relay : {}", rinfo->to_string());
 
-            auto res = co_await Node::control_send_and_wait_udp(sock, setup_packet, rinfo->endpoint, txn_id, known_relays_);
+            auto res = co_await Node::control_send_and_wait_udp(sock, setup_packet, rinfo->endpoint, txn_id, known_relays_, logger_);
 
             if(std::holds_alternative<std::vector<uint8_t>>(res)){
                 auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
@@ -503,7 +507,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
     auto sock = (primary_relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
-    auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_);
+    auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_, logger_);
 
     if(std::holds_alternative<std::vector<uint8_t>>(res)){
         auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
@@ -563,17 +567,20 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
 
 void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
+    LOG_DEBUG(logger_, "Client recieved packet from relay.");
+
     if(!packet){
         LOG_WARNING(logger_, "Recieved empty packet.");
         return;
     }
 
     if(!parse_incoming_packet(packet)){
-        LOG_WARNING(logger_, "Dropping faulty packet.");
+        LOG_WARNING(logger_, "Dropping faulty packet, couldn't parse packet");
         return;
     }
 
     if(packet->cid == static_cast<circuit_id_t>(-1)){
+        LOG_DEBUG(logger_, "Received control packet.");
         handle_control_from_relay(packet);
         return;
     }
@@ -701,10 +708,20 @@ void Client::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_
     }
 
     auto& pkt = utun_write_queue_.front();
+
+    // scatter gather buffer. for macOS, we need to include ip version (4 bytes)
+#if defined(__APPLE__)
     std::array<asio::const_buffer, 2> bufs = {
-        asio::buffer(&pkt->ip_version_macos, sizeof(pkt->ip_version_macos)),
+        asio::buffer(&pkt->ip_version_macos, FAMILY_HDR_UTUN_SZ),
         asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
     };
+#elif defined(__linux__)
+    std::array<asio::const_buffer, 1> bufs = {
+        asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
+    };
+#else
+    // not compatible
+#endif
 
     lock.unlock();
 
@@ -830,4 +847,138 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
     std::memcpy(buf.data() + offset, &req, sizeof(ExitHandshakeReq));
 
     return buf;
+}
+
+
+namespace{
+#include <array>
+#include <chrono>
+#include <memory>
+#include <netinet/ip_icmp.h>
+
+#if defined(__APPLE__)
+// fallback of icmphdr (not available in macos)
+struct icmphdr{
+    uint8_t type;      // ICMP message type
+    uint8_t code;      // ICMP operation code
+    uint16_t checksum; // ICMP checksum
+    union{
+        struct{
+            uint16_t id;
+            uint16_t sequence;
+        } echo;           // Echo datagram
+        uint32_t gateway; // Gateway address
+        struct{
+            uint16_t unused;
+            uint16_t mtu;
+        } frag; // Path MTU discovery
+    } un;
+};
+#endif
+
+
+uint16_t calculate_checksum(const uint16_t* data, size_t length){
+    uint32_t sum = 0;
+    while(length > 1){
+        sum += *data++;
+        length -= 2;
+    }
+    if(length == 1){
+        sum += *reinterpret_cast<const uint8_t*>(data);
+    }
+    while(sum >> 16){
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return static_cast<uint16_t>(~sum);
+}
+
+
+std::vector<uint8_t> build_icmp_echo_packet(const asio::ip::address_v4& src_ip,
+                                            const asio::ip::address_v4& dst_ip,
+                                            uint16_t seq_num){
+    std::vector<uint8_t> packet;
+
+    size_t header_offset = 0;
+#if defined(__APPLE__)
+    // macOS utun requires a 4-byte address family header (AF_INET in network byte order)
+    uint32_t family_hdr = htonl(AF_INET);
+    packet.resize(FAMILY_HDR_UTUN_SZ);
+    std::memcpy(packet.data(), &family_hdr, FAMILY_HDR_UTUN_SZ);
+    header_offset = FAMILY_HDR_UTUN_SZ;
+#endif
+
+    const size_t ip_len = sizeof(struct ip);
+    const size_t icmp_len = sizeof(struct icmphdr);
+    const std::string payload = "PING_SIMULATION";
+    const size_t total_ip_packet_len = ip_len + icmp_len + payload.size();
+
+    packet.resize(header_offset + total_ip_packet_len, 0);
+    uint8_t* ip_buf = packet.data() + header_offset;
+
+    // 1. Fill IPv4 Header
+    auto* iph = reinterpret_cast<struct ip*>(ip_buf);
+    iph->ip_v = 4;
+    iph->ip_hl = 5;
+    iph->ip_tos = 0;
+    iph->ip_len = htons(static_cast<uint16_t>(total_ip_packet_len));
+    iph->ip_id = htons(seq_num);
+    iph->ip_off = 0;
+    iph->ip_ttl = 64;
+    iph->ip_p = IPPROTO_ICMP;
+    iph->ip_src.s_addr = inet_addr(src_ip.to_string().c_str());
+    iph->ip_dst.s_addr = inet_addr(dst_ip.to_string().c_str());
+    iph->ip_sum = 0;
+    iph->ip_sum = calculate_checksum(reinterpret_cast<const uint16_t*>(iph), ip_len);
+
+    // 2. Fill ICMP Echo Request Header + Payload
+    uint8_t* icmp_buf = ip_buf + ip_len;
+    auto* icmph = reinterpret_cast<struct icmphdr*>(icmp_buf);
+    icmph->type = ICMP_ECHO;
+    icmph->code = 0;
+    icmph->un.echo.id = htons(0x1234);
+    icmph->un.echo.sequence = htons(seq_num);
+    icmph->checksum = 0;
+
+    std::memcpy(icmp_buf + icmp_len, payload.data(), payload.size());
+    icmph->checksum = calculate_checksum(reinterpret_cast<const uint16_t*>(icmp_buf), icmp_len + payload.size());
+
+    return packet;
+}
+}
+
+
+void Client::simulate_system_traffic(){
+    auto timer = std::make_shared<asio::steady_timer>(ioc_);
+    auto seq_num = std::make_shared<uint16_t>(0);
+
+    const auto target_ip = asio::ip::make_address_v4("1.1.1.1");
+
+    auto schedule_next = std::make_shared<std::function<void()>>();
+    *schedule_next = [this, timer, seq_num, target_ip, schedule_next](){
+        timer->expires_after(std::chrono::seconds(2));
+        timer->async_wait([this, timer, seq_num, target_ip, schedule_next](const boost::system::error_code& ec){
+            if(ec){
+                return;
+            }
+
+            (*seq_num)++;
+            auto raw_packet = std::make_shared<std::vector<uint8_t>>(
+                build_icmp_echo_packet(default_vpn_v4_, target_ip, *seq_num)
+            );
+
+            asio::async_write(
+                utun_stream_,
+                asio::buffer(*raw_packet),
+                [this, raw_packet, timer, schedule_next](const boost::system::error_code& write_ec, std::size_t /*bytes_transferred*/){
+                    if(write_ec){
+                        LOG_ERROR(logger_, "[UTUN] Failed to write simulated traffic packet: {}", write_ec.message());
+                        return;
+                    }
+                    (*schedule_next)();
+                }
+            );
+        });
+    };
+
+    (*schedule_next)();
 }

@@ -92,7 +92,7 @@ int main(const int argc, char* argv[]){
     asio::io_context ioc;
     auto work_guard = asio::make_work_guard(ioc);
 
-    const auto node = std::make_shared<Node>(ioc, cli_opts->role);
+    const auto node = std::make_shared<Node>(ioc, cli_opts.value());
 
     auto shutdown = [&]() {
         LOG_INFO(main_logger, "Stopping node and releasing work guard.");
@@ -109,9 +109,9 @@ int main(const int argc, char* argv[]){
         }
     });
 
-    asio::post(ioc, [&ioc, main_logger, node, shutdown](){
+    asio::post(ioc, [&ioc, main_logger, node, shutdown, cli_opts](){
         LOG_INFO(main_logger, "Trying node->start().");
-        asio::co_spawn(ioc, node->start(), [main_logger, shutdown](const std::exception_ptr& e, const bool result){
+        asio::co_spawn(ioc, node->start(cli_opts.value()), [main_logger, shutdown](const std::exception_ptr& e, const bool result){
             if(!e){
                 if(result)
                     LOG_INFO(main_logger, "Node started.");

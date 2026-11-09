@@ -74,7 +74,11 @@ static_assert(std::is_trivially_copyable_v<PayloadHeader>, "PayloadHeader is not
 
 constexpr size_t TRANSIT_HDR_SZ = sizeof(TransitHeader);
 constexpr size_t PAYLOAD_HDR_SZ = sizeof(PayloadHeader);
+#if defined(__APPLE__)
 constexpr size_t FAMILY_HDR_UTUN_SZ = sizeof(uint32_t);
+#elif defined(__linux__)
+constexpr size_t FAMILY_HDR_UTUN_SZ = 0;
+#endif
 
 // // #pragma pack(pop)           // ? END
 

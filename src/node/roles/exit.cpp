@@ -465,10 +465,20 @@ void Exit::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id
     }
 
     auto& pkt = utun_write_queue_.front();
+
+    // scatter gather buffer. for macOS, we need to include ip version (4 bytes)
+#if defined(__APPLE__)
     std::array<asio::const_buffer, 2> bufs = {
-        asio::buffer(&pkt->ip_version_macos, sizeof(pkt->ip_version_macos)),
+        asio::buffer(&pkt->ip_version_macos, FAMILY_HDR_UTUN_SZ),
         asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
     };
+#elif defined(__linux__)
+    std::array<asio::const_buffer, 1> bufs = {
+        asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
+    };
+#else
+    // not compatible
+#endif
 
     lock.unlock();
 

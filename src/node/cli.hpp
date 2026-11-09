@@ -1,9 +1,8 @@
 #pragma once
 
-#include "src/node/node.hpp"
+#include "src/node/node_utils.hpp"
 
 #include <algorithm>
-#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -15,13 +14,18 @@ namespace cli{
 struct CliOptions{
     NodeRole role = NodeRole::CLIENT_RELAY;
     uint16_t listen_port = 0; // 0 = OS assigned / ephemeral
+
+    bool specified_bootstrap = false;
     std::string bootstrap_ip = "127.0.0.1";
     uint16_t bootstrap_port = 6969;
+
     size_t thread_count = std::max(1u, std::thread::hardware_concurrency());
     std::string log_file = "logs.txt";
     bool console_log = false;
     bool show_help = false;
     bool show_version = false;
+    bool hijack_utun = true;
+    bool bootstrap_node = false;
 };
 
 
@@ -79,6 +83,8 @@ public:
             << "                                 relay        : Transit node forwarding cells between peers\n"
             << "                                 exit         : Egress node routing traffic to public destinations\n"
             << "                                 client-relay : Combined client and relay functionality\n"
+            << "  -j, --hijack <INT>           Hijack system traffic, 0 for No, everything else for Yes [default: 1]\n"
+            << "  -B, --imbootstrapbill        Start as a bootstrap node\n"
             << "  -p, --port <PORT>            UDP port to bind for incoming traffic [default: 0 (ephemeral)]\n"
             << "  -b, --bootstrap-ip <IP>      Bootstrap relay IPv4 address [default: 127.0.0.1]\n"
             << "      --bootstrap-port <PORT>  Bootstrap relay port [default: 6969]\n"
@@ -113,6 +119,10 @@ public:
             }
             if(arg == "-c" || arg == "--console-log"){
                 opts.console_log = true;
+                continue;
+            }
+            if(arg == "-B" || arg == "--imbootstrapbill"){
+                opts.bootstrap_node = true;
                 continue;
             }
 
@@ -170,12 +180,14 @@ public:
                 }
             }
             else if(key == "-b" || key == "--bootstrap-ip"){
+                opts.specified_bootstrap = true;
                 auto val = get_value(key);
                 if(!val)
                     return std::nullopt;
                 opts.bootstrap_ip = std::string(*val);
             }
             else if(key == "--bootstrap-port"){
+                opts.specified_bootstrap = true;
                 auto val = get_value(key);
                 if(!val)
                     return std::nullopt;
@@ -214,6 +226,12 @@ public:
                 if(!val)
                     return std::nullopt;
                 opts.log_file = std::string(*val);
+            }
+            else if(key == "-j" || key == "--hijack"){
+                auto val = get_value(key);
+                if(!val)
+                    return std::nullopt;
+                opts.hijack_utun = static_cast<bool>(std::stoi(std::string(*val)));
             }
             else{
                 std::cerr << "Error: Unrecognized option '" << arg << "'\n\n";

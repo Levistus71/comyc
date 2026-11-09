@@ -12,10 +12,10 @@ constexpr size_t RAW_PACKET_MAX_SZ = 2000;
 
 class RawPacket{
 public:
-    std::array<uint8_t, RAW_PACKET_MAX_SZ> payload;
-    size_t bytes_received = 0; // populated by usr
+    std::array<uint8_t, RAW_PACKET_MAX_SZ> payload{};
+    size_t bytes_received = 0;
 
-    uint32_t family_hdr = 0; // 4 byte macos field
+    uint32_t family_hdr = 0; // 4-byte macOS utun address family header (0 on Linux with IFF_NO_PI)
     size_t ip_hdr_sz = 0;
     size_t total_packet_len = 0;
 
@@ -31,6 +31,6 @@ private:
     [[nodiscard]] bool parse_macos_header();
 
 
-    [[nodiscard]] bool parse_headers();
+    [[nodiscard]] bool parse_headers(size_t header_offset);
 };
 }

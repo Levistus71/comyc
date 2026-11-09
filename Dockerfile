@@ -11,11 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     git \
     libboost-dev \
+    gdb \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # build and install quill (can't install directly using apt)
-RUN git clone --branch v7.4.2 --depth 1 https://github.com/odygrd/quill.git /tmp/quill && \
+RUN git clone --depth 1 https://github.com/odygrd/quill.git /tmp/quill && \
     cmake -S /tmp/quill -B /tmp/quill/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DQUILL_BUILD_TESTS=OFF \
@@ -30,7 +31,7 @@ COPY CMakeLists.txt ./
 COPY src/ ./src/
 
 RUN cmake -S . -B build -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release && \
+        -DCMAKE_BUILD_TYPE=Debug && \
     cmake --build build --target node_app
 
 
@@ -47,6 +48,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tcpdump \
     dnsutils \
     ca-certificates \
+    gdb \
+    gdbserver \
+    rsync \
+    libasan8 \
+    libubsan1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/build/node /usr/local/bin/node

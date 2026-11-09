@@ -3,19 +3,13 @@
 #include "src/node/roles/exit.hpp"
 #include "src/node/roles/relay.hpp"
 #include "src/network/packets/cell.hpp"
+#include "src/node/cli.hpp"
 
 #include <boost/asio.hpp>
 #include <utility>
 
+
 namespace asio = boost::asio;
-
-
-enum class NodeRole : uint8_t{
-    CLIENT       = 1 << 0,
-    RELAY        = 1 << 1,
-    EXIT         = 1 << 2,
-    CLIENT_RELAY = (1 << 0) | (1 << 1)
-};
 
 
 /**
@@ -59,10 +53,10 @@ assign role (client/client+relay)
 
 class Node : public std::enable_shared_from_this<Node>{
 public:
-    Node(asio::io_context& ioc, NodeRole role);
+    Node(asio::io_context& ioc, const cli::CliOptions& cli_options);
 
 
-    [[nodiscard]] asio::awaitable<bool> start();
+    [[nodiscard]] asio::awaitable<bool> start(const cli::CliOptions& cli_options);
 
 
     void stop();
@@ -107,12 +101,14 @@ public:
 
     static asio::awaitable<CommError> populate_relays(std::shared_ptr<RelaysInfoGlb> known_relays,
                                                       RelayInfo start_relay,
-                                                      std::shared_ptr<asio::ip::udp::socket> udp_sockv4);
+                                                      std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
+                                                      quill::Logger* logger);
 
 
     static asio::awaitable<CommError> establish_connection(RelayInfo relay,
                                                            std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
-                                                           std::shared_ptr<RelaysInfoGlb> known_relays);
+                                                           std::shared_ptr<RelaysInfoGlb> known_relays,
+                                                           quill::Logger* logger);
 
 
     static void resume_control_operation(txn_id_t txn_id,
@@ -127,15 +123,22 @@ public:
                                                                     std::vector<uint8_t> packet,
                                                                     asio::ip::udp::endpoint endpoint,
                                                                     txn_id_t txn_id,
-                                                                    std::shared_ptr<RelaysInfoGlb> relays_info_glb);
+                                                                    std::shared_ptr<RelaysInfoGlb> relays_info_glb,
+                                                                    quill::Logger* logger);
 
 
     struct Settings{
         static constexpr uint64_t ARENA_POOL_SIZE = 16834;
 
         // todo: change this
-        static constexpr std::string BOOTSTRAP_IP = "8.8.8.8";
+        static constexpr std::string BOOTSTRAP_IP = "127.0.0.1";
         static constexpr int BOOTSTRAP_PORT = 6969;
+    };
+
+
+    struct UDP_Comms_Settings{
+        static constexpr size_t max_attempts = 5;
+        static constexpr auto start_timeout = std::chrono::milliseconds(500);
     };
 
 
@@ -160,12 +163,6 @@ private:
 
     std::shared_ptr<RelaysInfoGlb> relays_info_glb_ = nullptr;
     static constexpr size_t DESIRED_RELAY_COUNT = 10;
-
-
-    struct udp_comms_config{
-        static constexpr size_t max_attempts = 5;
-        static constexpr auto start_timeout = std::chrono::milliseconds(100);
-    };
 
 
     RelayInfo bootstrap_node_;
@@ -193,7 +190,8 @@ private:
 
     static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay,
                                                                       std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
-                                                                      std::shared_ptr<RelaysInfoGlb> relays_info_glb);
+                                                                      std::shared_ptr<RelaysInfoGlb> relays_info_glb,
+                                                                      quill::Logger* logger);
 
 
     static std::vector<uint8_t> make_request_relay_list_packet(RelayInfo& relay, txn_id_t txn_id);
@@ -203,17 +201,81 @@ private:
     static auto async_wait_for_response(txn_id_t txn_id, CompletionToken&& token, const std::shared_ptr<RelaysInfoGlb>& relays_info_glb){
         using Signature = void(boost::system::error_code, std::vector<uint8_t>);
 
+        // async_initiate<initiation, token>: gets the raw handle from token, passes it on to the initiation lambda
+        // we can do whatever we want with the raw handle (called our_handle in this code)
+        // NOTE: we should also implement when our_handle is canceled
+        // cancellation may happen on another thread (timer thread) exactly when the packet arrives and the handler is called
+        // State {.std::atomic<bool> executed} takes care of that.
         return asio::async_initiate<CompletionToken, Signature>(
             [txn_id, relays_info_glb](auto handler){
-                auto h_ptr = std::make_shared<decltype(handler)>(std::move(handler));
+                auto cancel_slot = handler.get_cancellation_slot();
 
-                auto unbound_handler = [h_ptr](boost::system::error_code ec, std::vector<uint8_t> data) {
-                    (*h_ptr)(ec, std::move(data));
+                struct State{
+                    decltype(handler) h;
+                    std::atomic<bool> executed{false};
+
+
+                    State(decltype(handler)&& h):
+                        h(std::move(h)){}
+                };
+                auto state = std::make_shared<State>(std::move(handler));
+
+                auto our_handler = [state](boost::system::error_code ec, std::vector<uint8_t> data){
+                    if(!state->executed.exchange(true)){
+                        state->h(ec, std::move(data)); // execute the state->h by moving the received packet data
+                    }
                 };
 
-                std::mutex& mtx = relays_info_glb->registry_mutex_;
-                std::lock_guard<std::mutex> lock(mtx);
-                relays_info_glb->pending_requests_[txn_id] = std::move(unbound_handler);
+                if(cancel_slot.is_connected()){
+                    // our custom cancellation routine: remove txn_id from pending_requests_
+                    cancel_slot.assign([state, txn_id, relays_info_glb](asio::cancellation_type_t type){
+                        if(type != asio::cancellation_type::none){
+                            // remove from pending_requests_
+                            {
+                                std::lock_guard<std::mutex> lock(relays_info_glb->registry_mutex_);
+                                relays_info_glb->pending_requests_.erase(txn_id);
+                            }
+                            // update exchange to prevent packet_thread from executing this handle
+                            // NOTE: keep_state_alive now lives on the "timer thread" stack.
+                            // if we used state->h(cancel), cancellation_slot::clear() runs, it destroys this lambda
+                            // because this lambda now holds the last "state" shared_ptr (we erased our_handler from the
+                            // unordered_map just before this), "state" is now deleted.
+                            /*
+                            use after free in this case:
+                            Caller (asio internals):
+                                // ref_count = 1
+                                state->h(cancel)
+                                // ref_count now drops to 0
+                                crashes because state was freed (when the caller stack unrolls)
+                            coroutine:
+                                state is stored in completion lambda
+                                when state->h(cancel) is called, completion lambda is deleted, dropping state->ref_count
+                                to 0, freeing state
+
+                            safe in this case:
+                            Caller (asio internals):
+                                // ref_count = 1
+                                keep_state_alive = state;
+                                // ref_count = 2
+                                keep_state_alive->h(cancel);
+                                // state gets deleted, ref_count drops to 1
+                                now when caller's stack gets unrolled, it safely deletes the pointer.
+                            */
+                            auto keep_state_alive = state;
+                            if(!keep_state_alive->executed.exchange(true)){
+                                keep_state_alive->h(
+                                    boost::system::error_code(asio::error::operation_aborted),
+                                    std::vector<uint8_t>{}
+                                );
+                            }
+                        }
+                    });
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(relays_info_glb->registry_mutex_);
+                    relays_info_glb->pending_requests_[txn_id] = std::move(our_handler);
+                }
             },
             token
         );

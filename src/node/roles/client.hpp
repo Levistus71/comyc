@@ -78,7 +78,7 @@ public:
     Client& operator=(const Client& other) = delete;
 
 
-    [[nodiscard]] asio::awaitable<bool> start();
+    [[nodiscard]] asio::awaitable<bool> start(bool hijack_system_traffic);
 
 
     void stop();
@@ -195,4 +195,7 @@ private:
 
 
     void do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id);
+
+
+    void simulate_system_traffic();
 };

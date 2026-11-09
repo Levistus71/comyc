@@ -1,15 +1,24 @@
 #include "src/network/packets/packets.hpp"
-#include <iostream>
-#include <string>
-#include <random>
-#include <boost/asio.hpp>
+
+#include <cstring>
+#include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#include <sys/socket.h>
 
 
 namespace utun{
 [[nodiscard]] bool RawPacket::parse_packet(){
-    return parse_macos_header() && parse_headers();
+#if defined(__APPLE__)
+    if(!parse_macos_header())
+        return false;
+    return parse_headers(sizeof(family_hdr));
+#elif defined(__linux__)
+    family_hdr = 0;
+    return parse_headers(0);
+#else
+    return false;
+#endif
 }
 
 
@@ -33,25 +42,41 @@ namespace utun{
 }
 
 
-[[nodiscard]] bool RawPacket::parse_headers(){
-    if(bytes_received < sizeof(family_hdr) + ip_hdr_sz)
+[[nodiscard]] bool RawPacket::parse_headers(const size_t header_offset){
+#if defined(__linux__)
+    if(bytes_received < header_offset + 1){
         return false;
+    }
+    const uint8_t ip_version = payload[header_offset] >> 4;
+    if(ip_version == 4){
+        family_hdr = AF_INET;
+        ip_hdr_sz = sizeof(struct ip);
+    }
+    else if(ip_version == 6){
+        family_hdr = AF_INET6;
+        ip_hdr_sz = sizeof(struct ip6_hdr);
+    }
+    else{
+        return false;
+    }
+#endif
 
-    auto headers_start = payload.data() + sizeof(family_hdr);
+    if(bytes_received < header_offset + ip_hdr_sz){
+        return false;
+    }
 
+    const uint8_t* headers_start = payload.data() + header_offset;
     uint8_t protocol = 0;
 
     if(family_hdr == AF_INET){
-        auto* iph = reinterpret_cast<const struct ip*>(headers_start);
-        // while_debug
-        total_packet_len = ntohs(iph->ip_len); // doubt: might break on macos. don't use ntohs for macos.
+        const auto* iph = reinterpret_cast<const struct ip*>(headers_start);
 
-        ip_hdr_sz = iph->ip_hl * 4; // variable header size
-        if(ip_hdr_sz < 20 || bytes_received < sizeof(family_hdr) + ip_hdr_sz)
+        ip_hdr_sz = iph->ip_hl * 4;
+        if(ip_hdr_sz < 20 || bytes_received < header_offset + ip_hdr_sz){
             return false;
+        }
 
-        // ::inet_ntop(AF_INET, &iph->ip_src, src_str.data(), src_str.size());
-        // ::inet_ntop(AF_INET, &iph->ip_dst, dst_str.data(), dst_str.size());
+        total_packet_len = ntohs(iph->ip_len);
 
         asio::ip::address_v4::bytes_type src_bytes, dst_bytes;
         std::memcpy(src_bytes.data(), &iph->ip_src, 4);
@@ -62,12 +87,11 @@ namespace utun{
 
         protocol = iph->ip_p;
     }
-    else{
-        auto* ip6h = reinterpret_cast<const struct ip6_hdr*>(headers_start);
-        total_packet_len = sizeof(struct ip6_hdr) + ntohs(ip6h->ip6_plen);
+    else if(family_hdr == AF_INET6){
+        const auto* ip6h = reinterpret_cast<const struct ip6_hdr*>(headers_start);
 
-        // ::inet_ntop(AF_INET6, &ip6h->ip6_src, src_str.data(), src_str.size());
-        // ::inet_ntop(AF_INET6, &ip6h->ip6_dst, dst_str.data(), dst_str.size());
+        ip_hdr_sz = sizeof(struct ip6_hdr);
+        total_packet_len = sizeof(struct ip6_hdr) + ntohs(ip6h->ip6_plen);
 
         asio::ip::address_v6::bytes_type src_bytes, dst_bytes;
         std::memcpy(src_bytes.data(), &ip6h->ip6_src, 16);
@@ -76,20 +100,23 @@ namespace utun{
         src_addr = asio::ip::address_v6(src_bytes);
         dest_addr = asio::ip::address_v6(dst_bytes);
 
-        // imp: we don't care about header extensions in ipv6, we drop all those packets
-        // imp: in the protocol == IPPROTO_TCP || UDP check below.
-        protocol = ip6h->ip6_nxt; // doubt: header extensions
+        protocol = ip6h->ip6_nxt;
+    }
+    else{
+        return false;
     }
 
     if(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP){
-        if(bytes_received - ip_hdr_sz - sizeof(family_hdr) < 4)
+        if(bytes_received < header_offset + ip_hdr_sz + 4){
             return false;
+        }
 
-        const auto* p = payload.data() + ip_hdr_sz + sizeof(family_hdr);
+        const uint8_t* transport_start = payload.data() + header_offset + ip_hdr_sz;
 
-        uint16_t src, dst;
-        std::memcpy(&src, p, sizeof(src));
-        std::memcpy(&dst, p + 2, sizeof(dst));
+        uint16_t src = 0;
+        uint16_t dst = 0;
+        std::memcpy(&src, transport_start, sizeof(src));
+        std::memcpy(&dst, transport_start + 2, sizeof(dst));
 
         src_port = ntohs(src);
         dest_port = ntohs(dst);

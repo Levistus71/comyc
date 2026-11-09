@@ -231,6 +231,14 @@ void RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::erase(const Key& key){
 }
 
 
+enum class NodeRole : uint8_t{
+    CLIENT       = 1 << 0,
+    RELAY        = 1 << 1,
+    EXIT         = 1 << 2,
+    CLIENT_RELAY = (1 << 0) | (1 << 1)
+};
+
+
 struct NetworkTuple{
     struct ClientView{
         asio::ip::address c_src_addr;
