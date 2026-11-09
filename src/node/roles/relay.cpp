@@ -167,6 +167,9 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
         return;
     }
 
+    LOG_INFO(logger_, "Handling control packet from client. Endpoint: {}/{}",
+             sender_endpoint.address().to_string(), sender_endpoint.port());
+
     ControlHeader chdr{};
     std::memcpy(&chdr, data, CONTROL_HDR_SZ);
 
@@ -193,6 +196,15 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
             const auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
             auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
+
+            if(!sock || !sock->is_open()){
+                LOG_ERROR(logger_, "Target socket is not open for endpoint {}", sender_endpoint.address().to_string());
+                return;
+            }
+
+            LOG_INFO(logger_, "Sending response packet to endpoint {} via {}:{}",
+                sender_endpoint.address().to_string(), sock->local_endpoint().address().to_string(), sock->local_endpoint().port());
+
             sock->async_send_to(
                 asio::buffer(*send_data),
                 sender_endpoint,
@@ -261,10 +273,10 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             );
 
             // update maps
-            sid_ei_umap_.put_if_absent(sid, ExitInfo{ .endpoint = exit_ep });
+            sid_ei_umap_.put_if_absent(sid, ExitInfo{.endpoint = exit_ep});
             cid_ci_umap_.put_if_absent(req.circuit_id, *sid_ci_umap_.get(sid));
 
-            RelaySetupExitRes res{ .status = 0};
+            RelaySetupExitRes res{.status = 0};
             auto resp_buf = make_relay_setup_exit_res_packet(sid, chdr, res);
 
             auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
@@ -437,7 +449,7 @@ void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
         [me=shared_from_this(), keep_alive = std::move(packet)]
-    (const boost::system::error_code& ec, size_t bytes_xfer){
+        (const boost::system::error_code& ec, size_t bytes_xfer){
             if(ec){
                 LOG_ERROR(me->logger_, "Exit send failed: {}", ec.message());
                 return;

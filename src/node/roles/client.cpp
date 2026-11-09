@@ -77,13 +77,18 @@ Client::~Client(){
 }
 
 
-[[nodiscard]] asio::awaitable<bool> Client::start(bool hijack_system_traffic){
+[[nodiscard]] asio::awaitable<bool> Client::start(bool hijack_system_traffic, bool act_dead){
     if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
         LOG_ERROR(logger_, "Called start() more than once.");
         co_return false;
     }
 
-    {
+    if(act_dead){
+        LOG_INFO(logger_, "Started 'dead' client");
+        co_return true;
+    }
+
+    if(hijack_system_traffic){
         std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
         const asio::ip::address prefix_v4 = asio::ip::make_address("255.255.255.255");
         for(auto& rinfo: known_relays_->usable_relays){
@@ -580,7 +585,7 @@ void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
     }
 
     if(packet->cid == static_cast<circuit_id_t>(-1)){
-        LOG_DEBUG(logger_, "Received control packet.");
+        LOG_INFO(logger_, "Handling control packet from relay.");
         handle_control_from_relay(packet);
         return;
     }
@@ -659,6 +664,7 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) co
 
     std::vector<uint8_t> payload_data(body_ptr, body_ptr + body_len);
 
+    LOG_INFO(logger_, "Resuming node control operation.");
     if(known_relays_){
         Node::resume_control_operation(chdr.txn_id, std::move(payload_data), known_relays_);
     }

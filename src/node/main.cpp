@@ -5,9 +5,10 @@
 #include <quill/Frontend.h>
 #include <quill/LogMacros.h>
 #include "quill/sinks/FileSink.h"
+#include "quill/sinks/ConsoleSink.h"
 
 
-static void setup_loggers(const std::string& log_file){
+static void setup_loggers(const std::string& log_file, bool log_to_terminal){
     auto file_sink = quill::Frontend::create_or_get_sink<quill::FileSink>(
         log_file,
         [](){
@@ -18,9 +19,16 @@ static void setup_loggers(const std::string& log_file){
         quill::FileEventNotifier{}
     );
 
+    std::vector<std::shared_ptr<quill::Sink>> sinks{file_sink};
+
+    if(log_to_terminal){
+        auto console_sink = quill::Frontend::create_or_get_sink<quill::ConsoleSink>("console_sink");
+        sinks.push_back(console_sink);
+    }
+
     quill::Frontend::create_or_get_logger(
         "client_logger",
-        file_sink,
+        sinks,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Client] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
@@ -29,7 +37,7 @@ static void setup_loggers(const std::string& log_file){
 
     quill::Frontend::create_or_get_logger(
         "relay_logger",
-        file_sink,
+        sinks,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Relay] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
@@ -38,7 +46,7 @@ static void setup_loggers(const std::string& log_file){
 
     quill::Frontend::create_or_get_logger(
         "exit_logger",
-        file_sink,
+        sinks,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Exit] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
@@ -47,7 +55,7 @@ static void setup_loggers(const std::string& log_file){
 
     quill::Frontend::create_or_get_logger(
         "main_logger",
-        file_sink,
+        sinks,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Main] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
@@ -56,7 +64,7 @@ static void setup_loggers(const std::string& log_file){
 
     quill::Frontend::create_or_get_logger(
         "node_logger",
-        file_sink,
+        sinks,
         quill::PatternFormatterOptions{
             "[%(log_level)] [%(time)] [%(thread_id)] [Node] [%(caller_function)] [%(short_source_location)] %(message)",
             "%H:%M:%S.%Qns"
@@ -82,7 +90,7 @@ int main(const int argc, char* argv[]){
     }
 
     // quill
-    setup_loggers(cli_opts->log_file);
+    setup_loggers(cli_opts->log_file, cli_opts->console_log);
     auto main_logger = quill::Frontend::get_logger("main_logger");
     LOG_INFO(main_logger, "Starting node with role: {}, threads: {}, log_file: {}",
              cli::CliParser::role_to_string(cli_opts->role),
@@ -92,9 +100,10 @@ int main(const int argc, char* argv[]){
     asio::io_context ioc;
     auto work_guard = asio::make_work_guard(ioc);
 
-    const auto node = std::make_shared<Node>(ioc, cli_opts.value());
+    auto cli_opts_ptr = std::make_shared<cli::CliOptions>(cli_opts.value());
+    const auto node = std::make_shared<Node>(ioc, cli_opts_ptr);
 
-    auto shutdown = [&]() {
+    auto shutdown = [&](){
         LOG_INFO(main_logger, "Stopping node and releasing work guard.");
         node->stop();
         work_guard.reset(); // ioc.run() to returns once remaining handlers finish
@@ -109,9 +118,9 @@ int main(const int argc, char* argv[]){
         }
     });
 
-    asio::post(ioc, [&ioc, main_logger, node, shutdown, cli_opts](){
+    asio::post(ioc, [&ioc, main_logger, node, shutdown, cli_opts_ptr](){
         LOG_INFO(main_logger, "Trying node->start().");
-        asio::co_spawn(ioc, node->start(cli_opts.value()), [main_logger, shutdown](const std::exception_ptr& e, const bool result){
+        asio::co_spawn(ioc, node->start(cli_opts_ptr), [main_logger, shutdown](const std::exception_ptr& e, const bool result){
             if(!e){
                 if(result)
                     LOG_INFO(main_logger, "Node started.");

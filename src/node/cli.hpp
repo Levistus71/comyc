@@ -53,9 +53,6 @@ public:
             return static_cast<char>(std::tolower(c));
         });
 
-        if(lower == "client"){
-            return NodeRole::CLIENT;
-        }
         if(lower == "relay"){
             return NodeRole::RELAY;
         }
@@ -83,7 +80,7 @@ public:
             << "                                 relay        : Transit node forwarding cells between peers\n"
             << "                                 exit         : Egress node routing traffic to public destinations\n"
             << "                                 client-relay : Combined client and relay functionality\n"
-            << "  -j, --hijack <INT>           Hijack system traffic, 0 for No, everything else for Yes [default: 1]\n"
+            << "  -j, --hijack-off             Don't hijack system traffic [default: hijacks]\n"
             << "  -B, --imbootstrapbill        Start as a bootstrap node\n"
             << "  -p, --port <PORT>            UDP port to bind for incoming traffic [default: 0 (ephemeral)]\n"
             << "  -b, --bootstrap-ip <IP>      Bootstrap relay IPv4 address [default: 127.0.0.1]\n"
@@ -125,6 +122,10 @@ public:
                 opts.bootstrap_node = true;
                 continue;
             }
+            if(arg == "-j" || arg=="--hijack-off"){
+                opts.hijack_utun = false;
+                continue;
+            }
 
             // Options taking a value
             std::string_view key;
@@ -157,7 +158,7 @@ public:
                     return std::nullopt;
                 auto parsed_role = parse_role(*val);
                 if(!parsed_role){
-                    std::cerr << "Error: Invalid role '" << *val << "'. Valid roles are: client, relay, exit, client-relay\n";
+                    std::cerr << "Error: Invalid role '" << *val << "'. Valid roles are: client-relay, exit\n";
                     return std::nullopt;
                 }
                 opts.role = *parsed_role;
@@ -226,12 +227,6 @@ public:
                 if(!val)
                     return std::nullopt;
                 opts.log_file = std::string(*val);
-            }
-            else if(key == "-j" || key == "--hijack"){
-                auto val = get_value(key);
-                if(!val)
-                    return std::nullopt;
-                opts.hijack_utun = static_cast<bool>(std::stoi(std::string(*val)));
             }
             else{
                 std::cerr << "Error: Unrecognized option '" << arg << "'\n\n";

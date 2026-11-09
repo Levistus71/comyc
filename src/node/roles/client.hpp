@@ -78,7 +78,7 @@ public:
     Client& operator=(const Client& other) = delete;
 
 
-    [[nodiscard]] asio::awaitable<bool> start(bool hijack_system_traffic);
+    [[nodiscard]] asio::awaitable<bool> start(bool hijack_system_traffic, bool act_dead = false);
 
 
     void stop();

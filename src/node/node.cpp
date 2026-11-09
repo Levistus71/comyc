@@ -12,23 +12,27 @@
 #include "quill/Frontend.h"
 
 
-Node::Node(asio::io_context& ioc, const cli::CliOptions& options):
-    role_(options.role),
+Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
+    role_(options->role),
     ioc_(ioc),
     incoming_cell_pool_(Settings::ARENA_POOL_SIZE, "node_logger"){
-    udp_socketv4_ = std::make_shared<asio::ip::udp::socket>(ioc_);
-    udp_socketv6_ = std::make_shared<asio::ip::udp::socket>(ioc_);
     logger_ = quill::Frontend::get_logger("node_logger");
+    using udp = asio::ip::udp;
 
-    if(options.specified_bootstrap)
-        bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address(options.bootstrap_ip), options.bootstrap_port);
+    udp_socketv4_ = std::make_shared<udp::socket>(ioc_);
+    udp_socketv6_ = std::make_shared<udp::socket>(ioc_);
+
+    if(options->specified_bootstrap)
+        bootstrap_node_.endpoint = udp::endpoint(asio::ip::make_address(options->bootstrap_ip), options->bootstrap_port);
     else
-        bootstrap_node_.endpoint = asio::ip::udp::endpoint(asio::ip::make_address(Settings::BOOTSTRAP_IP), Settings::BOOTSTRAP_PORT);
+        bootstrap_node_.endpoint = udp::endpoint(asio::ip::make_address(Settings::BOOTSTRAP_IP), Settings::BOOTSTRAP_PORT);
 
     sender_endpoint_ = std::make_shared<asio::ip::udp::endpoint>();
 
-    const bool is_client = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::CLIENT);
+    const bool is_pure_client = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::CLIENT);
     const bool is_relay = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::RELAY);
+    const bool is_client = is_pure_client || is_relay;
+    dead_client_ = !is_pure_client && is_relay;
     const bool is_exit = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::EXIT);
 
     if(is_client || is_relay)
@@ -45,23 +49,44 @@ Node::Node(asio::io_context& ioc, const cli::CliOptions& options):
 }
 
 
-[[nodiscard]] asio::awaitable<bool> Node::start(const cli::CliOptions& options){
+[[nodiscard]] asio::awaitable<bool> Node::start(std::shared_ptr<cli::CliOptions> options){
     if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
         LOG_ERROR(logger_, "start() called when running_.");
         co_return false;
     }
 
+    using udp = asio::ip::udp;
     boost::system::error_code ec;
-    ec = udp_socketv4_->open(asio::ip::udp::v4(), ec);
-    if(ec){
-        LOG_ERROR(logger_, "udp_socketv4_ failed to open.");
+    if((ec = udp_socketv4_->open(asio::ip::udp::v4(), ec))){
+        LOG_ERROR(logger_, "Failed to open udp_socketv4, aborting. ec: {}", ec.what());
         co_return false;
     }
+    if(options->listen_port != 0){
+        if((ec = udp_socketv4_->bind(udp::endpoint(udp::v4(), options->listen_port), ec))){
+            LOG_ERROR(logger_, "UDP socket v4 binding failed for port {}, falling back to ephemeral. ec: {}",
+                      options->listen_port, ec.what());
 
+            if((ec = udp_socketv4_->bind(udp::endpoint(udp::v4(), 0), ec))){
+                LOG_ERROR(logger_, "Failed to assign v4 fallback ephemeral port, aborting. ec: {}", ec.what());
+                co_return false;
+            }
+        }
+    }
+    else{
+        if((ec = udp_socketv4_->bind(udp::endpoint(udp::v4(), 0), ec))){
+            LOG_ERROR(logger_, "Failed to bind v4 to ephemeral port, aborting. ec: {}", ec.what());
+            co_return false;
+        }
+    }
+
+    // fixme: port will be assigned to ipv4 only for now
     ec.clear();
-    ec = udp_socketv6_->open(asio::ip::udp::v6(), ec);
-    if(ec){
-        LOG_ERROR(logger_, "udp_socketv6_ failed to open.");
+    if(udp_socketv6_->open(asio::ip::udp::v6(), ec)){
+        LOG_ERROR(logger_, "Failed to open udp_socketv6, aborting. ec: {}", ec.what());
+        co_return false;
+    }
+    if((ec = udp_socketv6_->bind(udp::endpoint(udp::v6(), 0), ec))){
+        LOG_ERROR(logger_, "Failed to bind v6 to ephemeral port, aborting. ec: {}", ec.what());
         co_return false;
     }
 
@@ -70,8 +95,11 @@ Node::Node(asio::io_context& ioc, const cli::CliOptions& options):
     auto first_packetv6 = incoming_cell_pool_.alloc();
     listenv6(std::move(first_packetv6));
 
+    LOG_INFO(logger_, "Started v4 listening on port: {}", udp_socketv4_->local_endpoint().port());
+    LOG_INFO(logger_, "Started v6 listening on port: {}", udp_socketv6_->local_endpoint().port());
+
     if(relays_info_glb_){
-        if(options.bootstrap_node){
+        if(options->bootstrap_node){
             LOG_INFO(logger_, "I'm Bootstrap Bill, skipping establish_connection...");
         }
         else{
@@ -84,12 +112,7 @@ Node::Node(asio::io_context& ioc, const cli::CliOptions& options):
     }
 
     if(client_ != nullptr){
-        if(relays_info_glb_->usable_relays.empty()){
-            LOG_ERROR(logger_, "cannot start client:");
-            LOG_ERROR(logger_, "failed to populate usable_relay list. all_relay count: {}", relays_info_glb_->all_relays.size());
-            co_return false;
-        }
-        if(!co_await client_->start(options.hijack_utun)){
+        if(!co_await client_->start(options->hijack_utun, dead_client_)){
             LOG_ERROR(logger_, "Client not started.");
             co_return false;
         }
@@ -199,6 +222,9 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
 
 
 bool Node::is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays){
+    // FIXME: remove this, just for testing
+    return true;
+
     // fixme: can't we do anything for ipv6 :(
     // just rejecting ipv6
     if(!ep.address().is_v4())
@@ -392,7 +418,7 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
     for(size_t attempt = 1; attempt <= UDP_Comms_Settings::max_attempts; attempt++){
         try{
             co_await udp_sockv4->async_send_to(asio::buffer(packet), endpoint, asio::use_awaitable);
-            LOG_INFO(logger, "sent packet number {}, txn_id%10000: {}, waiting for response", attempt, txn_id%10000);
+            LOG_INFO(logger, "sent packet number {}, txn_id: {}, waiting for response", attempt, txn_id%10000);
 
             asio::steady_timer timer(executor, timeout);
 
@@ -406,13 +432,13 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
             );
 
             if(result.index() == 0){
-                LOG_INFO(logger, "received response from packet number {}, txn_id%10000 {}", attempt, txn_id%10000);
+                LOG_INFO(logger, "received response from packet number {}, txn_id {}", attempt, txn_id%10000);
                 timer.cancel();
                 auto response_packet = std::get<0>(std::move(result));
                 co_return response_packet;
             }
 
-            LOG_INFO(logger, "timer's up,  didn't receive response, packet number {}, txn_id%10000 {}", attempt, txn_id%10000);
+            LOG_INFO(logger, "timer's up,  didn't receive response, packet number {}, txn_id {}", attempt, txn_id%10000);
             auto& mut = relays_info_glb->registry_mutex_;
             std::lock_guard<std::mutex> lock(mut);
             relays_info_glb->pending_requests_.erase(txn_id);
@@ -477,7 +503,7 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
     }
     packet->route_flag = static_cast<RoutingFlag>(packet->payload[0]);
 
-    LOG_DEBUG(logger_, "Recieved packet.");
+    LOG_INFO(logger_, "Received packet from outside, endpoint: {}:{}", endpoint.address().to_string(), endpoint.port());
 
     switch(packet->route_flag){
         case RoutingFlag::CLIENT_TO_RELAY: {

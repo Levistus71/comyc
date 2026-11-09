@@ -53,10 +53,10 @@ assign role (client/client+relay)
 
 class Node : public std::enable_shared_from_this<Node>{
 public:
-    Node(asio::io_context& ioc, const cli::CliOptions& cli_options);
+    Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> cli_options);
 
 
-    [[nodiscard]] asio::awaitable<bool> start(const cli::CliOptions& cli_options);
+    [[nodiscard]] asio::awaitable<bool> start(std::shared_ptr<cli::CliOptions> cli_options);
 
 
     void stop();
@@ -158,6 +158,7 @@ public:
 
 private:
     NodeRole role_;
+    bool dead_client_ = false;
 
     std::atomic<bool> running_;
 

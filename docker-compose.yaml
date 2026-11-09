@@ -9,7 +9,7 @@ services:
       comyc-net:
         ipv4_address: 10.10.0.10
     ports:
-      - "6969:6969"
+      - "6969:6969/udp"
     restart: unless-stopped
 
   relay-1:
@@ -61,7 +61,7 @@ services:
     command: ["node", "-r", "relay", "-p", "7004", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
     networks:
       comyc-net:
-        ipv4_address: 10.50.0.12
+        ipv4_address: 10.10.0.14
     restart: unless-stopped
 
   exit:
@@ -80,7 +80,7 @@ services:
     command: ["node", "-r", "exit", "-p", "8001", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
     networks:
       comyc-net:
-        ipv4_address: 10.60.0.20
+        ipv4_address: 10.10.0.20
     restart: unless-stopped
 
   client:
@@ -104,7 +104,7 @@ services:
       - "7777:7777"
     devices:
       - /dev/net/tun:/dev/net/tun
-    command: ["node", "-r", "client", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
+    command: ["node", "-r", "client-relay", "-b", "10.10.0.10", "--bootstrap-port", "6969", "-c"]
     networks:
       comyc-net:
         ipv4_address: 10.10.0.30
@@ -116,5 +116,5 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: 10.0.0.0/8
+        - subnet: 10.10.0.0/24
           gateway: 10.10.0.1
