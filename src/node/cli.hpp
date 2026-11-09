@@ -158,7 +158,7 @@ public:
                     return std::nullopt;
                 auto parsed_role = parse_role(*val);
                 if(!parsed_role){
-                    std::cerr << "Error: Invalid role '" << *val << "'. Valid roles are: client-relay, exit\n";
+                    std::cerr << "Error: Invalid role '" << *val << "'. Valid roles are: client-relay, relay, exit\n";
                     return std::nullopt;
                 }
                 opts.role = *parsed_role;

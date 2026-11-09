@@ -105,7 +105,9 @@ public:
                                                       quill::Logger* logger);
 
 
-    static asio::awaitable<CommError> establish_connection(RelayInfo relay,
+    /* ALWAYS COAWAIT THIS FUNCTION, RELAY PASSED IN BY REFERENCE */
+    /* TODO: PASS IN A SHARED_PTR FOR FUTURE SAFETY */
+    static asio::awaitable<CommError> establish_connection(RelayInfo& relay,
                                                            std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                            std::shared_ptr<RelaysInfoGlb> known_relays,
                                                            quill::Logger* logger);
@@ -181,9 +183,6 @@ private:
     ArenaAllocator<IncomingCell> incoming_cell_pool_;
 
     quill::Logger* logger_{nullptr};
-
-
-    static bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays);
 
 
     static std::vector<uint8_t> make_connection_packet(RelayInfo& relay, txn_id_t txn_id);

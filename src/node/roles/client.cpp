@@ -423,6 +423,21 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         LOG_INFO(logger_, "Starting making default circuit.");
     }
 
+    LOG_INFO(logger_, "All known relays size: {}", known_relays_->all_relays.size());
+    LOG_INFO(logger_, "Usable relays size: {}", known_relays_->usable_relays.size());
+
+    {
+        std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
+        LOG_DEBUG(logger_, "all relays:");
+        for(const auto& rinfo: known_relays_->all_relays){
+            LOG_DEBUG(logger_, "\t {}:{}", rinfo.endpoint.address().to_string(), rinfo.endpoint.port());
+        }
+        LOG_DEBUG(logger_, "usable relays:");
+        for(const auto& rinfo: known_relays_->usable_relays){
+            LOG_DEBUG(logger_, "\t {}:{}", rinfo.endpoint.address().to_string(), rinfo.endpoint.port());
+        }
+    }
+
     std::vector<std::shared_ptr<RelayInfo>> relay_list;
     if(known_relays_){
         std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
@@ -432,7 +447,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     }
 
     if(relay_list.size() < Settings::DEFAULT_NUM_ENTRY_RELAYS){
-        LOG_INFO(logger_, "Couldn't make new circuit, not enough relays.");
+        LOG_INFO(logger_, "Couldn't make new circuit, not enough relays. Tried choosing: {}", relay_list.size());
         co_return false;
     }
 
@@ -572,8 +587,6 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
 
 void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
-    LOG_DEBUG(logger_, "Client recieved packet from relay.");
-
     if(!packet){
         LOG_WARNING(logger_, "Recieved empty packet.");
         return;
@@ -585,7 +598,6 @@ void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
     }
 
     if(packet->cid == static_cast<circuit_id_t>(-1)){
-        LOG_INFO(logger_, "Handling control packet from relay.");
         handle_control_from_relay(packet);
         return;
     }
@@ -664,7 +676,6 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) co
 
     std::vector<uint8_t> payload_data(body_ptr, body_ptr + body_len);
 
-    LOG_INFO(logger_, "Resuming node control operation.");
     if(known_relays_){
         Node::resume_control_operation(chdr.txn_id, std::move(payload_data), known_relays_);
     }

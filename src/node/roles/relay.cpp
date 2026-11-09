@@ -185,14 +185,39 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             RelayHandshakeReq req{};
             std::memcpy(&req, msg_body, sizeof(RelayHandshakeReq));
 
+            auto requested_sid = req.session_id_req;
+
+            LOG_INFO(logger_, "HANDSHAKE: {}, endpoint: {}:{}", requested_sid, sender_endpoint.address().to_string(), sender_endpoint.port());
+
             const ClientInfo cinfo{
-                .session_id = sid,
+                .session_id = requested_sid,
                 .endpoint   = sender_endpoint
             };
             // exit information is not yet confirmed.
-            sid_ci_umap_.put_if_absent(sid, cinfo);
+            sid_ci_umap_.put_if_absent(requested_sid, cinfo);
 
-            auto resp_buf = make_relay_handshake_rep_pakcet(sid, chdr);
+            auto asdf = sid_ci_umap_.get(requested_sid);
+            if(!asdf){
+                LOG_INFO(logger_, "rcu map fail");
+            }
+            else{
+                LOG_INFO(logger_, "inserted and retrieved sid. client info: {}:{}", asdf->endpoint.address().to_string(), asdf->endpoint.port());
+            }
+
+            // update known_relays_
+            if(known_relays_){
+                LOG_INFO(logger_, "Updating known_relays_, prev size: {}", known_relays_->all_relays.size());
+                auto& mut = known_relays_->registry_mutex_;
+                std::lock_guard<std::mutex> lock(mut);
+                auto rinfo = RelayInfo{.session_id = requested_sid, .endpoint = sender_endpoint};
+                known_relays_->all_relays.insert(rinfo);
+                if(!known_relays_->usable_relays.contains(rinfo) && is_relay_diverse(rinfo.endpoint, known_relays_->usable_relays)){
+                    known_relays_->usable_relays.insert(rinfo);
+                }
+                LOG_INFO(logger_, "Updating known_relays_, after size: {}", known_relays_->all_relays.size());
+            }
+
+            auto resp_buf = make_relay_handshake_rep_pakcet(requested_sid, chdr);
 
             const auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
             auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
@@ -203,7 +228,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             }
 
             LOG_INFO(logger_, "Sending response packet to endpoint {} via {}:{}",
-                sender_endpoint.address().to_string(), sock->local_endpoint().address().to_string(), sock->local_endpoint().port());
+                     sender_endpoint.address().to_string(), sock->local_endpoint().address().to_string(), sock->local_endpoint().port());
 
             sock->async_send_to(
                 asio::buffer(*send_data),
@@ -274,7 +299,12 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
             // update maps
             sid_ei_umap_.put_if_absent(sid, ExitInfo{.endpoint = exit_ep});
-            cid_ci_umap_.put_if_absent(req.circuit_id, *sid_ci_umap_.get(sid));
+            auto client_info = sid_ci_umap_.get(sid);
+            if(client_info == nullptr){
+                LOG_ERROR(logger_, "Client information is nullptr, asked to setup exit. sid: {}", sid);
+                return;
+            }
+            cid_ci_umap_.put_if_absent(req.circuit_id, *client_info);
 
             RelaySetupExitRes res{.status = 0};
             auto resp_buf = make_relay_setup_exit_res_packet(sid, chdr, res);

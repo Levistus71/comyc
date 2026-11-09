@@ -170,6 +170,8 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
     if(start_relay.session_id == std::numeric_limits<session_id_t>::max())
         co_return CommError(true, "start_relay unconnected to populate relay list.");
 
+    known_relays->all_relays.insert(start_relay);
+
     std::mt19937& rng = RandomGen::gen_;
 
     std::unordered_set<RelayInfo> visited;
@@ -218,30 +220,6 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
     }
 
     co_return CommError(false);
-}
-
-
-bool Node::is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays){
-    // FIXME: remove this, just for testing
-    return true;
-
-    // fixme: can't we do anything for ipv6 :(
-    // just rejecting ipv6
-    if(!ep.address().is_v4())
-        return false;
-
-    const uint32_t candidate_ip = ep.address().to_v4().to_uint();
-    const uint32_t candidate_subnet = candidate_ip & 0xFFFF0000; // /16 mask
-
-    for(const auto& [session_id, endpoint]: existing_relays){
-        if(endpoint.address().is_v4()){
-            const uint32_t existing_ip = endpoint.address().to_v4().to_uint();
-            if(const uint32_t existing_subnet = existing_ip & 0xFFFF0000; candidate_subnet == existing_subnet){
-                return false; // reject nodes sharing the same /16 subnet
-            }
-        }
-    }
-    return true;
 }
 
 
@@ -362,7 +340,7 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
 }
 
 
-asio::awaitable<Node::CommError> Node::establish_connection(RelayInfo relay,
+asio::awaitable<Node::CommError> Node::establish_connection(RelayInfo& relay,
                                                             std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                             std::shared_ptr<RelaysInfoGlb> relays_info_glb,
                                                             quill::Logger* logger){

@@ -23,6 +23,8 @@ services:
     networks:
       comyc-net:
         ipv4_address: 10.10.0.11
+    ports:
+      - "7001:7001/udp"
     restart: unless-stopped
 
   relay-2:
@@ -36,6 +38,8 @@ services:
     networks:
       comyc-net:
         ipv4_address: 10.10.0.12
+    ports:
+      - "7002:7002/udp"
     restart: unless-stopped
 
   relay-3:
@@ -49,6 +53,8 @@ services:
     networks:
       comyc-net:
         ipv4_address: 10.10.0.13
+    ports:
+      - "7003:7003/udp"
     restart: unless-stopped
 
   relay-4:
@@ -62,6 +68,8 @@ services:
     networks:
       comyc-net:
         ipv4_address: 10.10.0.14
+    ports:
+      - "7004:7004/udp"
     restart: unless-stopped
 
   exit:
@@ -81,6 +89,8 @@ services:
     networks:
       comyc-net:
         ipv4_address: 10.10.0.20
+    ports:
+      - "8001:8001/udp"
     restart: unless-stopped
 
   client:

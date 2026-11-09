@@ -601,3 +601,27 @@ public:
 
     inline thread_local static std::mt19937 gen_{std::random_device{}()};
 };
+
+
+inline bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays){
+    // FIXME: remove this, just for testing
+    return true;
+
+    // fixme: can't we do anything for ipv6 :(
+    // just rejecting ipv6
+    if(!ep.address().is_v4())
+        return false;
+
+    const uint32_t candidate_ip = ep.address().to_v4().to_uint();
+    const uint32_t candidate_subnet = candidate_ip & 0xFFFF0000; // /16 mask
+
+    for(const auto& [session_id, endpoint]: existing_relays){
+        if(endpoint.address().is_v4()){
+            const uint32_t existing_ip = endpoint.address().to_v4().to_uint();
+            if(const uint32_t existing_subnet = existing_ip & 0xFFFF0000; candidate_subnet == existing_subnet){
+                return false; // reject nodes sharing the same /16 subnet
+            }
+        }
+    }
+    return true;
+}
