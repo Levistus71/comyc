@@ -66,7 +66,8 @@ public:
     Client(asio::io_context& ioc,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
-           std::shared_ptr<RelaysInfoGlb> known_relays);
+           std::shared_ptr<RelaysInfoGlb> known_relays,
+           asio::ip::udp::endpoint exit_endpoint);
 
 
     ~Client();
@@ -111,6 +112,8 @@ private:
     std::shared_ptr<CircuitInfo> default_ci_;
     asio::ip::address_v4 default_vpn_v4_;
     asio::ip::address_v6 default_vpn_v6_;
+
+    std::vector<asio::ip::udp::endpoint> exits_;
 
     ArenaAllocator<utun::RawPacket> raw_packet_pool_;
 

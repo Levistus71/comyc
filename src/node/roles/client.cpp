@@ -54,7 +54,8 @@ void CircuitInfo::touch(const std::shared_ptr<Client>& client_ptr) const{
 Client::Client(asio::io_context& ioc,
                std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
                std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
-               std::shared_ptr<RelaysInfoGlb> known_relays):
+               std::shared_ptr<RelaysInfoGlb> known_relays,
+               asio::ip::udp::endpoint exit_endpoint):
     ioc_(ioc),
     udp_socketv4_(std::move(udp_socketv4)),
     udp_socketv6_(std::move(udp_socketv6)),
@@ -67,6 +68,7 @@ Client::Client(asio::io_context& ioc,
     logger_ = quill::Frontend::get_logger("client_logger");
     default_vpn_v4_ = RandomGen::gen_address_v4();
     default_vpn_v6_ = RandomGen::gen_address_v6();
+    exits_ = {std::move(exit_endpoint)};
 }
 
 
@@ -453,8 +455,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
     circuit_id_t assigned_cid = RandomGen::gen_circuit_id();
 
-    // todo: proper exit choosing
-    asio::ip::udp::endpoint exit_ep(asio::ip::make_address("8.8.8.8"), 7000);
+    auto exit_ep = RandomGen::choose_exit(exits_);
 
     // RELAY_SETUP_EXIT_REQ (tell relays about the new exit)
     std::vector<std::shared_ptr<RelayInfo>> selected_relays;

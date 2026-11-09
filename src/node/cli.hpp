@@ -19,6 +19,10 @@ struct CliOptions{
     std::string bootstrap_ip = "127.0.0.1";
     uint16_t bootstrap_port = 6969;
 
+    bool specified_exit = false;
+    std::string exit_ip = "8.8.8.8";
+    uint16_t exit_port = 6969;
+
     size_t thread_count = std::max(1u, std::thread::hardware_concurrency());
     std::string log_file = "logs.txt";
     bool console_log = false;
@@ -85,6 +89,8 @@ public:
             << "  -p, --port <PORT>            UDP port to bind for incoming traffic [default: 0 (ephemeral)]\n"
             << "  -b, --bootstrap-ip <IP>      Bootstrap relay IPv4 address [default: 127.0.0.1]\n"
             << "      --bootstrap-port <PORT>  Bootstrap relay port [default: 6969]\n"
+            << "  -e, --exit-ip <IP>           Exit IPv4 address [default: 8.8.8.8]\n"
+            << "      --exit-port <PORT>       Exit port [default: 6969]\n"
             << "  -t, --threads <NUM>          Worker thread pool size [default: hardware concurrency ("
             << std::max(1u, std::thread::hardware_concurrency()) << ")]\n"
             << "  -l, --log-file <PATH>        Path to output log file [default: logs.txt]\n"
@@ -202,6 +208,29 @@ public:
                 }
                 catch(...){
                     std::cerr << "Error: Invalid bootstrap port '" << *val << "'\n";
+                    return std::nullopt;
+                }
+            }
+            else if(key=="-e" || key=="--exit-ip"){
+                opts.specified_exit = true;
+                auto val = get_value(key);
+                if(!val)
+                    return std::nullopt;
+                opts.bootstrap_ip = std::string(*val);
+            }
+            else if(key=="--exit-port"){
+                opts.specified_exit = true;
+                auto val = get_value(key);
+                try{
+                    int p = std::stoi(std::string(*val));
+                    if(p <= 0 || p > 65535){
+                        std::cerr << "Error: Exit port must be in range 1 - 65535, got '" << *val << "'\n";
+                        return std::nullopt;
+                    }
+                    opts.exit_port = static_cast<uint16_t>(p);
+                }
+                catch(...){
+                    std::cerr << "Error: Invalid Exit port '" << *val << "'\n";
                     return std::nullopt;
                 }
             }

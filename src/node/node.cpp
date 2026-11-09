@@ -38,8 +38,26 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
     if(is_client || is_relay)
         relays_info_glb_ = std::make_shared<RelaysInfoGlb>();
 
-    if(is_client)
-        client_ = std::make_shared<Client>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_);
+    if(is_client){
+        asio::ip::udp::endpoint exit_endpoint;
+        bool inited = false;
+        if(options->specified_exit){
+            try{
+                exit_endpoint = asio::ip::udp::endpoint(asio::ip::make_address(options->exit_ip), options->exit_port);
+                inited = true;
+            }
+            catch(...){
+                LOG_ERROR(logger_, "Specified exit address unable to be converted to valid address: {}", options->exit_ip);
+                LOG_ERROR(logger_, "Using default exit address.");
+            }
+        }
+        if(!inited){
+            // todo: change this from google dns
+            exit_endpoint = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 6969);
+        }
+
+        client_ = std::make_shared<Client>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_, exit_endpoint);
+    }
 
     if(is_relay)
         relay_ = std::make_shared<Relay>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_);

@@ -196,17 +196,8 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             // exit information is not yet confirmed.
             sid_ci_umap_.put_if_absent(requested_sid, cinfo);
 
-            auto asdf = sid_ci_umap_.get(requested_sid);
-            if(!asdf){
-                LOG_INFO(logger_, "rcu map fail");
-            }
-            else{
-                LOG_INFO(logger_, "inserted and retrieved sid. client info: {}:{}", asdf->endpoint.address().to_string(), asdf->endpoint.port());
-            }
-
             // update known_relays_
             if(known_relays_){
-                LOG_INFO(logger_, "Updating known_relays_, prev size: {}", known_relays_->all_relays.size());
                 auto& mut = known_relays_->registry_mutex_;
                 std::lock_guard<std::mutex> lock(mut);
                 auto rinfo = RelayInfo{.session_id = requested_sid, .endpoint = sender_endpoint};
@@ -214,7 +205,6 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
                 if(!known_relays_->usable_relays.contains(rinfo) && is_relay_diverse(rinfo.endpoint, known_relays_->usable_relays)){
                     known_relays_->usable_relays.insert(rinfo);
                 }
-                LOG_INFO(logger_, "Updating known_relays_, after size: {}", known_relays_->all_relays.size());
             }
 
             auto resp_buf = make_relay_handshake_rep_pakcet(requested_sid, chdr);

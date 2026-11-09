@@ -598,6 +598,11 @@ public:
         return asio::ip::address_v6(bytes);
     }
 
+    static asio::ip::udp::endpoint& choose_exit(std::vector<asio::ip::udp::endpoint> exits){
+        std::uniform_int_distribution<std::size_t> dist(0, exits.size() - 1);
+        return exits[dist(gen_)];
+    }
+
 
     inline thread_local static std::mt19937 gen_{std::random_device{}()};
 };
