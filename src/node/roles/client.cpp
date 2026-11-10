@@ -91,14 +91,25 @@ Client::~Client(){
     }
 
     if(hijack_system_traffic){
-        std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
+        // add relay routes
         const asio::ip::address prefix_v4 = asio::ip::make_address("255.255.255.255");
-        for(auto& rinfo: known_relays_->usable_relays){
-            if(!utun_.add_del_route(true, rinfo.endpoint.address(), prefix_v4)){
-                LOG_ERROR(logger_, "Failed to add {} to utun routes.", rinfo.endpoint.address().to_string());
+        {
+            std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
+            for(auto& rinfo: known_relays_->usable_relays){
+                if(!utun_.add_del_route(true, rinfo.endpoint.address(), prefix_v4)){
+                    LOG_ERROR(logger_, "Failed to add relay {} to utun routes.", rinfo.endpoint.address().to_string());
+                    co_return false;
+                }
+                LOG_INFO(logger_, "Added relay {} to utun routes.", rinfo.endpoint.address().to_string());
+            }
+        }
+        // add exit routes
+        for(auto& ep: exits_){
+            if(!utun_.add_del_route(true, ep.address(), prefix_v4)){
+                LOG_ERROR(logger_, "Failed to add exit {} to utun routes.", ep.address().to_string());
                 co_return false;
             }
-            LOG_INFO(logger_, "Added {} to utun routes.", rinfo.endpoint.address().to_string());
+            LOG_INFO(logger_, "Added exit {} to utun routes.", ep.address().to_string());
         }
     }
 
