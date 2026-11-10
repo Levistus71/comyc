@@ -514,6 +514,17 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     auto txn_id = RandomGen::gen_txn_id();
     auto primary_relay = selected_relays[0];
 
+    // temporarily update sid_ci_umap_ to hear control/response packets from exit
+    auto temporary_ci = std::make_shared<CircuitInfo>(CircuitInfo{
+        .circuit_id       = assigned_cid,
+        .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(0),
+        .relays           = {},
+        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 1, 0),
+        .nt               = nt,
+        .activity_counter = std::make_shared<Statistics<10>>()
+    });
+    sid_ci_umap_.put(primary_relay->session_id, temporary_ci);
+
     std::vector<uint8_t> create_packet;
     if(nt.has_value()){
         // not default circuit
@@ -570,6 +581,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
     for(const auto& rinfo: selected_relays){
         sid_ci_umap_.put(rinfo->session_id, final_ci);
+        LOG_INFO(logger_, "Put sid: {} into sid_ci_umap_ for ci: {}", rinfo->session_id, assigned_cid);
     }
 
     // update nt_ci_umap_. new packets should use the new ci from now
@@ -598,7 +610,7 @@ void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
         return;
     }
 
-    if(packet->cid == static_cast<circuit_id_t>(-1)){
+    if(packet->control_packet){
         handle_control_from_relay(packet);
         return;
     }
@@ -632,6 +644,7 @@ incoming packet:
     if(packet->cid == static_cast<circuit_id_t>(-1) || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)){
         packet->start_offset = min_hdr_sz;
         packet->payload_bytes = packet->bytes_received - min_hdr_sz;
+        packet->control_packet = true;
         return true;
     }
 
@@ -685,11 +698,11 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) co
 
 void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
     auto circuit_info = sid_ci_umap_.get(packet->sid);
-    circuit_info->touch(shared_from_this());
     if(!circuit_info){
         LOG_WARNING(logger_, "Recieved incoming packet with unknown sid: {}, cid: {}", packet->sid, packet->cid);
         return;
     }
+    circuit_info->touch(shared_from_this());
 
     const auto reorder_buffer = circuit_info->reorder_buffer;
     if(!reorder_buffer->insert_try_drain(

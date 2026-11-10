@@ -163,6 +163,8 @@ struct IncomingCell{
     RoutingFlag route_flag = RoutingFlag::INVALID;
     size_t start_offset = 0;
 
+    bool control_packet = false;
+
     session_id_t sid = 0;
     circuit_id_t cid = 0;
 

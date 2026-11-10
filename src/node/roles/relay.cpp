@@ -384,6 +384,7 @@ void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
                                                             ? udp_socketv4_
                                                             : udp_socketv6_;
 
+    LOG_INFO(logger_, "Forwarding packet to exit, endpoint: {}:{}", exit_info->endpoint.address().to_string(), exit_info->endpoint.port());
     sock->async_send_to(
         outgoing,
         exit_info->endpoint,

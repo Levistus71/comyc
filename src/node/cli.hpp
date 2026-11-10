@@ -216,7 +216,7 @@ public:
                 auto val = get_value(key);
                 if(!val)
                     return std::nullopt;
-                opts.bootstrap_ip = std::string(*val);
+                opts.exit_ip = std::string(*val);
             }
             else if(key=="--exit-port"){
                 opts.specified_exit = true;

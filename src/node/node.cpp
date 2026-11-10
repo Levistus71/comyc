@@ -503,23 +503,31 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
 
     switch(packet->route_flag){
         case RoutingFlag::CLIENT_TO_RELAY: {
-            if(relay_)
+            if(relay_){
+                LOG_INFO(logger_, "processing packet from client, routing to relay.");
                 relay_->process_packet_from_client(std::move(packet), endpoint);
+            }
             return;
         }
         case RoutingFlag::EXIT_TO_RELAY: {
-            if(relay_)
+            if(relay_){
+                LOG_INFO(logger_, "processing packet from exit, routing to relay.");
                 relay_->process_packet_from_exit(std::move(packet));
+            }
             return;
         }
         case RoutingFlag::RELAY_TO_CLIENT: {
-            if(client_)
+            if(client_){
+                LOG_INFO(logger_, "processing packet from relay, routing to client.");
                 client_->process_incoming_packet(std::move(packet));
+            }
             return;
         }
         case RoutingFlag::RELAY_TO_EXIT: {
-            if(exit_)
+            if(exit_){
+                LOG_INFO(logger_, "processing packet from relay, routing to exit.");
                 exit_->process_incoming_packet(std::move(packet), endpoint);
+            }
             return;
         }
         default: {

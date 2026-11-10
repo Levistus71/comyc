@@ -258,6 +258,9 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
 
             std::shared_ptr<CircuitInfo> ci = nullptr;
 
+            LOG_INFO(logger_, "Handshake request received for cid: {}, relay_endpoint: {}:{}", cid,
+                relay_endpoint.address().to_string(), relay_endpoint.port());
+
             // insert cid in cid_ci_umap_
             {
                 std::vector<std::shared_ptr<RelayInfo>> relays;

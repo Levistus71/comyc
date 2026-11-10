@@ -127,7 +127,7 @@ private:
     std::mutex ci_computing_drain_mtx_;
 
     // incoming
-    RCU_UMap<sequence_id_t, std::shared_ptr<CircuitInfo>> sid_ci_umap_;
+    RCU_UMap<session_id_t, std::shared_ptr<CircuitInfo>> sid_ci_umap_;
     // utun
     std::mutex utun_write_mtx_;
     std::deque<ArenaSlot<IncomingCell>> utun_write_queue_;
