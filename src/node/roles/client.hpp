@@ -94,7 +94,7 @@ public:
 
     struct Settings{
         static constexpr uint64_t HIGH_USAGE_THRESHOLD = 300;
-        static constexpr uint64_t DEFAULT_NUM_ENTRY_RELAYS = 1;
+        static constexpr uint64_t DEFAULT_NUM_ENTRY_RELAYS = 2;
 
         static_assert(DEFAULT_NUM_ENTRY_RELAYS < MAX_RELAYS_PER_CIRCUIT, "Default number of entry relays too large.");
 

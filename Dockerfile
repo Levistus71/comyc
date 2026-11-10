@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     git \
     libboost-dev \
+    libfmt-dev \
     gdb \
     ca-certificates \
     netcat-openbsd \
@@ -54,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rsync \
     libasan8 \
     libubsan1 \
+    libfmt10 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/build/node /usr/local/bin/node

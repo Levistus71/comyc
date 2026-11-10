@@ -430,7 +430,9 @@ struct std::hash<SrcAddrNetworkTuple>{
 
 
 struct RelayInfo{
-    session_id_t session_id; // -1 : not connected, anything else: connected
+    // NOTE: session_id is mutable. it doesn't affect == or the has function
+    // we need it to be mutable for establish_connection(const RelayInfo&,...);
+    mutable session_id_t session_id; // -1 : not connected, anything else: connected
     asio::ip::udp::endpoint endpoint;
     // relay performance
     // sh_cr
@@ -440,7 +442,7 @@ struct RelayInfo{
     }
 
 
-    std::string to_string(){
+    std::string to_string() const{
         std::stringstream ss;
         ss << "RelayInfo{";
 

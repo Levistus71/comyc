@@ -51,6 +51,7 @@ add_compile_definitions(
 find_package(Boost REQUIRED COMPONENTS headers)
 find_package(quill REQUIRED)
 find_package(Threads REQUIRED)
+find_package(fmt CONFIG REQUIRED)
 
 # NETWORK
 add_library(network
@@ -58,7 +59,7 @@ add_library(network
         src/network/sockets/utun.cpp
 )
 target_include_directories(network PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(network PRIVATE Boost::headers quill::quill Threads::Threads)
+target_link_libraries(network PRIVATE Boost::headers quill::quill Threads::Threads fmt::fmt)
 
 # NODE APP
 add_executable(node_app
@@ -70,4 +71,4 @@ add_executable(node_app
 )
 set_target_properties(node_app PROPERTIES OUTPUT_NAME "node")
 target_include_directories(node_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(node_app PRIVATE network Boost::headers quill::quill Threads::Threads)
+target_link_libraries(node_app PRIVATE network Boost::headers quill::quill Threads::Threads fmt::fmt)

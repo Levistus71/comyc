@@ -10,6 +10,7 @@
 
 #include "quill/LogMacros.h"
 #include "quill/Frontend.h"
+#include "fmt/format.h"
 
 
 Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
@@ -227,7 +228,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
         size_t branch_count = 0;
         for(const auto& new_relay: relay_list){
             known_relays->all_relays.insert(new_relay);
-            if(branch_count >= RANDOM_SAMPLE_SIZE && !visited.contains(new_relay)){
+            if(branch_count <= RANDOM_SAMPLE_SIZE && !visited.contains(new_relay)){
                 visited.insert(new_relay);
                 stk.push(new_relay);
                 branch_count++;
@@ -237,11 +238,37 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
         current_depth++;
     }
 
+    // if the dfs didn't result in desired_relay_count usable relays
+    for(const auto& relay: known_relays->all_relays){
+        if(known_relays->usable_relays.size() >= DESIRED_RELAY_COUNT)
+            break;
+        if(known_relays->usable_relays.contains(relay) || !is_relay_diverse(relay.endpoint, known_relays->usable_relays))
+            continue;
+        if(co_await establish_connection(relay, udp_sockv4, known_relays, logger)){
+            LOG_INFO(logger, "Couldn't connect to relay: {}:{}", relay.endpoint.address().to_string(), relay.endpoint.port());
+            continue;
+        }
+        known_relays->usable_relays.insert(relay);
+    }
+
+    // LOG
+    std::string known_str;
+    for(const auto& [session_id, endpoint]: known_relays->all_relays){
+        known_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", session_id, endpoint.address().to_string(), endpoint.port());
+    }
+
+    std::string usable_str;
+    for(const auto& [session_id, endpoint]: known_relays->usable_relays){
+        usable_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", session_id, endpoint.address().to_string(), endpoint.port());
+    }
+
+    LOG_INFO(logger, "Populated Relays Summary:\nAll Known Relays:{}\nUsable (Connected) Relays:{}", known_str, usable_str);
+
     co_return CommError(false);
 }
 
 
-std::vector<uint8_t> Node::make_connection_packet(RelayInfo& relay, txn_id_t txn_id){
+std::vector<uint8_t> Node::make_connection_packet(const RelayInfo& relay, txn_id_t txn_id){
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayHandshakeReq));
 
     size_t offset = 0;
@@ -358,7 +385,7 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
 }
 
 
-asio::awaitable<Node::CommError> Node::establish_connection(RelayInfo& relay,
+asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& relay,
                                                             std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                             std::shared_ptr<RelaysInfoGlb> relays_info_glb,
                                                             quill::Logger* logger){

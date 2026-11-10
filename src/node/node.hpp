@@ -107,7 +107,7 @@ public:
 
     /* ALWAYS COAWAIT THIS FUNCTION, RELAY PASSED IN BY REFERENCE */
     /* TODO: PASS IN A SHARED_PTR FOR FUTURE SAFETY */
-    static asio::awaitable<CommError> establish_connection(RelayInfo& relay,
+    static asio::awaitable<CommError> establish_connection(const RelayInfo& relay,
                                                            std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                            std::shared_ptr<RelaysInfoGlb> known_relays,
                                                            quill::Logger* logger);
@@ -185,7 +185,7 @@ private:
     quill::Logger* logger_{nullptr};
 
 
-    static std::vector<uint8_t> make_connection_packet(RelayInfo& relay, txn_id_t txn_id);
+    static std::vector<uint8_t> make_connection_packet(const RelayInfo& relay, txn_id_t txn_id);
 
 
     static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay,
