@@ -67,7 +67,8 @@ outgoing packet:
     TransitHeader thdr{};
     std::memcpy(&thdr, packet->payload.data() + packet->start_offset, TRANSIT_HDR_SZ);
     packet->cid = thdr.circuit_id;
-    packet->control_packet = packet->cid == static_cast<circuit_id_t>(-1) || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL);
+    packet->control_packet = packet->cid == static_cast<circuit_id_t>(-1); // || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL);
+    // ^ maybe control for exit too: only condition: cid = -1
     return true;
 }
 
@@ -344,6 +345,12 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
             RelaySetupExitRes res{.status = 0};
             auto resp_buf = make_relay_setup_exit_res_packet(sid, chdr, res);
+
+            // encrypt
+            {
+                auto hdr_size = sizeof(RoutingFlag) + sizeof(session_id_t);
+                crypto::encrypt_layer_cr(sh_cr, resp_buf.data() + hdr_size, resp_buf.size() - hdr_size);
+            }
 
             auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
             auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
