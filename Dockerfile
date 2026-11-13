@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libboost-dev \
     libfmt-dev \
+    libssl-dev \
     gdb \
     ca-certificates \
     netcat-openbsd \
@@ -50,6 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tcpdump \
     dnsutils \
     ca-certificates \
+    openssl \
     gdb \
     gdbserver \
     rsync \

@@ -1,4 +1,5 @@
 #include <src/node/roles/exit.hpp>
+#include "src/encryption/encryption.hpp"
 
 #include <quill/LogMacros.h>
 
@@ -162,7 +163,10 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
     };
     std::memcpy(header_buf->data() + offset, &phdr, PAYLOAD_HDR_SZ);
 
-    // todo: encrypt using sh_ce
+    // encrypt using sh_ce: phdr + ip payload
+    crypto::encrypt_layer_ce(circuit_info->sh_ce, header_buf->data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, PAYLOAD_HDR_SZ);
+    crypto::encrypt_layer_ce(circuit_info->sh_ce, raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes);
+
     size_t outgoing_bytes = HEADER_SZ + app_internal_bytes;
     const std::array<asio::const_buffer, 2> outgoing = {
         asio::buffer(*header_buf),
@@ -211,7 +215,7 @@ void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp
         return;
     }
 
-    if(!parse_thdr_incoming_packet(packet)){
+    if(!parse_headers_incoming_packet(packet)){
         LOG_ERROR(logger_, "Failed to parse incoming packet.");
         return;
     }
@@ -259,7 +263,16 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
             std::shared_ptr<CircuitInfo> ci = nullptr;
 
             LOG_INFO(logger_, "Handshake request received for cid: {}, relay_endpoint: {}:{}", cid,
-                relay_endpoint.address().to_string(), relay_endpoint.port());
+                     relay_endpoint.address().to_string(), relay_endpoint.port());
+
+            crypto::EphemeralDH dh;
+            crypto::Key256 sh_ce{};
+            crypto::PubKey256 peer_pubkey{};
+            std::memcpy(peer_pubkey.data(), req.public_key, sizeof(peer_pubkey));
+            if(!dh.compute_shared_secret(peer_pubkey, sh_ce)){
+                LOG_ERROR(logger_, "Exit failed to compute shared secret SH_CE with client for cid: {}", cid);
+                return;
+            }
 
             // insert cid in cid_ci_umap_
             {
@@ -275,12 +288,13 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 }
 
                 ci = std::make_shared<CircuitInfo>(CircuitInfo{
-                    .circuit_id      = cid,
-                    .sequence_id_ptr = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
-                    .relays          = std::move(relays),
-                    .reorder_buffer  = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq),
+                    .circuit_id       = cid,
+                    .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
+                    .relays           = std::move(relays),
+                    .sh_ce            = sh_ce,
+                    .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq),
                     /* not used by exit, compiler warns */
-                    .nt = NetworkTuple::create_exit_nt(asio::ip::address{}, asio::ip::address{}, 0, 0),
+                    .nt               = NetworkTuple::create_exit_nt(asio::ip::address{}, asio::ip::address{}, 0, 0),
                     .activity_counter = {}
                 });
 
@@ -314,7 +328,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
 
             // build EXIt to send back through the relay
             // RoutingFlag::EXIT_TO_RELAY + TransitHeader + ControlHeader + ExitCircuitCreateRes
-            auto resp_packet = make_exit_handshake_resp_packet(chdr, cid, our_initial_seq, Settings::REORDER_BUFFER_SIZE);
+            auto resp_packet = make_exit_handshake_resp_packet(chdr, cid, our_initial_seq, Settings::REORDER_BUFFER_SIZE, dh.public_key());
 
             auto sock = (relay_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
             auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_packet));
@@ -340,7 +354,8 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
 std::vector<uint8_t> Exit::make_exit_handshake_resp_packet(const ControlHeader& chdr,
                                                            circuit_id_t cid,
                                                            sequence_id_t seq_id,
-                                                           uint64_t reorder_buffer_size){
+                                                           uint64_t reorder_buffer_size,
+                                                           const std::array<uint8_t, 32>& pubkey){
     std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeRes));
     size_t offset = 0;
 
@@ -368,8 +383,10 @@ std::vector<uint8_t> Exit::make_exit_handshake_resp_packet(const ControlHeader& 
         .start_seq_exit  = seq_id,
         .rob_window_size = static_cast<uint32_t>(reorder_buffer_size),
         .status_code     = 0,
-        ._reserved_      = {0, 0, 0}
+        ._reserved_      = {0, 0, 0},
+        .public_key      = {}
     };
+    std::memcpy(res.public_key, pubkey.data(), sizeof(res.public_key));
     std::memcpy(resp_buf.data() + offset, &res, sizeof(ExitHandshakeRes));
 
     return resp_buf;
@@ -384,7 +401,7 @@ incoming packet:
 thdr:
 circuit_id is at the start
 */
-[[nodiscard]] bool Exit::parse_thdr_incoming_packet(const ArenaSlot<IncomingCell>& packet){
+[[nodiscard]] bool Exit::parse_headers_incoming_packet(const ArenaSlot<IncomingCell>& packet){
     if(packet->bytes_received < sizeof(RoutingFlag) + TRANSIT_HDR_SZ){
         return false;
     }
@@ -398,6 +415,13 @@ circuit_id is at the start
         packet->start_offset = sizeof(RoutingFlag) + TRANSIT_HDR_SZ;
         packet->payload_bytes = packet->bytes_received - packet->start_offset;
         return true;
+    }
+
+    // decrypt using sh_ce
+    auto circuit_info = cid_ci_umap_.get(packet->cid);
+    if(circuit_info){
+        size_t inner_len = packet->bytes_received - (sizeof(RoutingFlag) + TRANSIT_HDR_SZ);
+        crypto::decrypt_layer_ce(circuit_info->sh_ce, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, inner_len);
     }
 
     constexpr size_t min_data_sz = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;
@@ -496,8 +520,7 @@ void Exit::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id
             if(!me->utun_write_queue_.empty()){
                 me->utun_write_queue_.pop_front();
             }
-            me->do_write_utun(std::move(lk), seq_id+1);
+            me->do_write_utun(std::move(lk), seq_id + 1);
         }
     );
 }
-

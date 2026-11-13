@@ -14,7 +14,7 @@ enum class PayloadTier : uint8_t{
 };
 
 
-enum class RoutingFlag : uint8_t{
+enum class RoutingFlag : uint32_t{
     CLIENT_TO_RELAY = 0,
     RELAY_TO_EXIT   = 1,
     EXIT_TO_RELAY   = 2,
@@ -83,60 +83,6 @@ constexpr size_t FAMILY_HDR_UTUN_SZ = 0;
 // // #pragma pack(pop)           // ? END
 
 
-using PayloadBuffer = std::variant<
-    std::array<uint8_t, 64>,
-    std::array<uint8_t, 128>,
-    std::array<uint8_t, 512>,
-    std::array<uint8_t, 1024>
->;
-
-
-using ExitBoundBuffer = std::variant<
-    std::array<uint8_t, 64 + PAYLOAD_HDR_SZ>,
-    std::array<uint8_t, 128 + PAYLOAD_HDR_SZ>,
-    std::array<uint8_t, 512 + PAYLOAD_HDR_SZ>,
-    std::array<uint8_t, 1024 + PAYLOAD_HDR_SZ>
->;
-
-
-using RelayBoundBuffer = std::variant<
-    std::array<uint8_t, 64 + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ>,
-    std::array<uint8_t, 128 + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ>,
-    std::array<uint8_t, 512 + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ>,
-    std::array<uint8_t, 1024 + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ>
->;
-
-
-struct RelayBoundCell{
-    RoutingFlag route_flag;
-    session_id_t session_id;        // 4 Bytes: for client and relays to figure out which shared key to use if they are connected in multiple circuits
-    RelayBoundBuffer tphdr_payload; // TransitHeader + PayloadHeader + app data aka InnerCell
-};
-
-
-// struct ExitBoundCell{
-//     TransitHeader thdr;
-//     ExitBoundBuffer phdr_payload;   // PayloadHeader + app data aka RawCell
-// };
-
-
-struct ExitFullCell{
-    RoutingFlag route_flag;
-    TransitHeader thdr;
-    PayloadHeader phdr;
-    PayloadBuffer payload; // app data
-};
-
-
-struct ClientFullCell{
-    RoutingFlag route_flag;
-    session_id_t session_id; // unencrypted
-    TransitHeader thdr;      // encrypted using SH_CR
-    PayloadHeader phdr;      // encrypted using SH_CR(SH_CE)
-    PayloadBuffer payload;   // encrypted using SH_CR(SH_CE)
-};
-
-
 struct ClientFullHeaders{
     RoutingFlag route_flag;
     session_id_t session_id;
@@ -144,12 +90,8 @@ struct ClientFullHeaders{
     PayloadHeader phdr;
 };
 
-
-struct ExitFullHeaders{
-    RoutingFlag route_flag;
-    TransitHeader thdr;
-    PayloadHeader phdr;
-};
+static_assert(sizeof(ClientFullHeaders) == 40, "ClientFullHeaders not formatted properly");
+static_assert(std::is_trivially_copyable_v<ClientFullHeaders>, "ClientFullHeaders not trivially copyable");
 
 
 constexpr size_t CELL_MAX_SZ = 2000;

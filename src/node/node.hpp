@@ -185,7 +185,7 @@ private:
     quill::Logger* logger_{nullptr};
 
 
-    static std::vector<uint8_t> make_connection_packet(const RelayInfo& relay, txn_id_t txn_id);
+    static std::vector<uint8_t> make_connection_packet(const RelayInfo& relay, txn_id_t txn_id, const std::array<uint8_t, 32>& pubkey);
 
 
     static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay,

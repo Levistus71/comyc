@@ -1,5 +1,6 @@
 #include "src/node/node.hpp"
 #include "src/network/comms/control.hpp"
+#include "src/encryption/encryption.hpp"
 
 #include <stack>
 #include <algorithm>
@@ -253,13 +254,13 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
 
     // LOG
     std::string known_str;
-    for(const auto& [session_id, endpoint]: known_relays->all_relays){
-        known_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", session_id, endpoint.address().to_string(), endpoint.port());
+    for(const auto& relay: known_relays->all_relays){
+        known_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", relay.session_id, relay.endpoint.address().to_string(), relay.endpoint.port());
     }
 
     std::string usable_str;
-    for(const auto& [session_id, endpoint]: known_relays->usable_relays){
-        usable_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", session_id, endpoint.address().to_string(), endpoint.port());
+    for(const auto& relay: known_relays->usable_relays){
+        usable_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", relay.session_id, relay.endpoint.address().to_string(), relay.endpoint.port());
     }
 
     LOG_INFO(logger, "Populated Relays Summary:\nAll Known Relays:{}\nUsable (Connected) Relays:{}", known_str, usable_str);
@@ -268,7 +269,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
 }
 
 
-std::vector<uint8_t> Node::make_connection_packet(const RelayInfo& relay, txn_id_t txn_id){
+std::vector<uint8_t> Node::make_connection_packet(const RelayInfo& relay, txn_id_t txn_id, const std::array<uint8_t, 32>& pubkey){
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayHandshakeReq));
 
     size_t offset = 0;
@@ -302,6 +303,7 @@ std::vector<uint8_t> Node::make_connection_packet(const RelayInfo& relay, txn_id
     // control body
     RelayHandshakeReq req{};
     req.session_id_req = relay.session_id;
+    std::memcpy(req.public_key, pubkey.data(), sizeof(req.public_key));
     std::memcpy(buf.data() + offset, &req, sizeof(RelayHandshakeReq));
 
     return buf;
@@ -398,7 +400,13 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
     relay.session_id = RandomGen::gen_session_id();
     const txn_id_t txn_id = RandomGen::gen_txn_id();
 
-    const auto packet = make_connection_packet(relay, txn_id);
+    crypto::EphemeralDH dh;
+    if(!dh.initialized){
+        LOG_ERROR(logger, "Failed to initialize ephemeral DH for relay connection");
+        co_return CommError(true, "crypto DH init failed");
+    }
+
+    const auto packet = make_connection_packet(relay, txn_id, dh.public_key());
 
     LOG_INFO(logger, "trying to connect via udp, max attempts : {}", UDP_Comms_Settings::max_attempts);
     auto res = co_await control_send_and_wait_udp(udp_sockv4, packet, relay.endpoint, txn_id, relays_info_glb, logger);
@@ -406,8 +414,20 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
     if(std::holds_alternative<std::vector<uint8_t>>(res)){
         LOG_INFO(logger, "established connection");
         auto response = std::get<std::vector<uint8_t>>(std::move(res));
-        // todo: process payload (encryption mostly)
         // client::process_incoming_packet already parsed the raw packet. we just get the response body.
+        if(response.size() >= sizeof(RelayHandshakeRes)){
+            RelayHandshakeRes handshake_res{};
+            std::memcpy(&handshake_res, response.data(), sizeof(RelayHandshakeRes));
+
+            crypto::PubKey256 peer_pubkey{};
+            std::memcpy(peer_pubkey.data(), handshake_res.public_key, sizeof(peer_pubkey));
+
+            if(!dh.compute_shared_secret(peer_pubkey, relay.sh_cr)){
+                LOG_ERROR(logger, "Failed to compute shared secret SH_CR with relay");
+                co_return CommError(true, "shared secret derivation failed");
+            }
+            LOG_INFO(logger, "Derived shared secret SH_CR with relay successfully");
+        }
         co_return false;
     }
 

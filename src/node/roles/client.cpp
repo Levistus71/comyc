@@ -3,6 +3,7 @@
 #include "src/network/sockets/utun.hpp"
 #include "src/network/comms/control.hpp"
 #include "src/node/node.hpp"
+#include "src/encryption/encryption.hpp"
 
 
 #include <ifaddrs.h>
@@ -235,7 +236,15 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
         }
     });
 
-    // todo: encrypt sh_ce, sh_cr
+    // encrypt sh_ce: phdr and ip payload
+    crypto::encrypt_layer_ce(ci->sh_ce, reinterpret_cast<uint8_t*>(&headers->phdr), sizeof(PayloadHeader));
+    crypto::encrypt_layer_ce(ci->sh_ce, raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes);
+
+    // encrypt sh_cr: encrypt thdr, phdr, and IP payload
+    // Note: session_id and route_flag remain plaintext for the Relay to read
+    crypto::encrypt_layer_cr(relay->sh_cr, reinterpret_cast<uint8_t*>(&headers->thdr), TRANSIT_HDR_SZ + sizeof(PayloadHeader));
+    crypto::encrypt_layer_cr(relay->sh_cr, raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes);
+
     size_t outgoing_bytes = sizeof(ClientFullHeaders) + app_internal_bytes;
     const std::array<asio::const_buffer, 2> outgoing = {
         asio::buffer(headers.get(), sizeof(ClientFullHeaders)),
@@ -525,6 +534,12 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     auto txn_id = RandomGen::gen_txn_id();
     auto primary_relay = selected_relays[0];
 
+    crypto::EphemeralDH dh;
+    if(!dh.initialized){
+        LOG_ERROR(logger_, "Failed to initialize DH for exit handshake");
+        co_return false;
+    }
+
     // temporarily update sid_ci_umap_ to hear control/response packets from exit
     auto temporary_ci = std::make_shared<CircuitInfo>(CircuitInfo{
         .circuit_id       = assigned_cid,
@@ -540,22 +555,24 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     if(nt.has_value()){
         // not default circuit
         create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays,
-                                                   default_vpn_v4_, nt->c_src_port(), nt->c_dest_addr().to_v4(), nt->c_dest_port(), false);
+                                                   default_vpn_v4_, nt->c_src_port(), nt->c_dest_addr().to_v4(), nt->c_dest_port(), false, dh.public_key());
     }
     else{
         // default circuit
         create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays,
-                                                   default_vpn_v4_, 0, asio::ip::address_v4(), 0, true);
+                                                   default_vpn_v4_, 0, asio::ip::address_v4(), 0, true, dh.public_key());
     }
 
     auto sock = (primary_relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
     auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_, logger_);
 
+    crypto::Key256 sh_ce{};
+
     if(std::holds_alternative<std::vector<uint8_t>>(res)){
         auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
         // process_incoming_packet already parsed packet
-        if(response_vec.size() < sizeof(RelaySetupExitRes)){
+        if(response_vec.size() < sizeof(ExitHandshakeRes)){
             LOG_INFO(logger_, "Couldn't connect to exit : received response size too small.");
             co_return false;
         }
@@ -573,6 +590,14 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
             co_return false;
         }
 
+        crypto::PubKey256 exit_pubkey{};
+        std::memcpy(exit_pubkey.data(), response.public_key, sizeof(exit_pubkey));
+        if(!dh.compute_shared_secret(exit_pubkey, sh_ce)){
+            LOG_ERROR(logger_, "Failed to compute shared secret SH_CE with exit");
+            co_return false;
+        }
+        LOG_INFO(logger_, "Derived shared secret SH_CE with exit successfully");
+
         exit_start_seq = response.start_seq_exit;
         LOG_INFO(logger_, "Setup relay for exit.");
     }
@@ -585,6 +610,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         .circuit_id       = assigned_cid,
         .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(exit_start_seq),
         .relays           = selected_relays,
+        .sh_ce            = sh_ce,
         .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 2048, exit_start_seq),
         .nt               = nt,
         .activity_counter = std::make_shared<Statistics<10>>()
@@ -646,7 +672,23 @@ incoming packet:
     std::memcpy(&net_sid, packet->payload.data() + sizeof(RoutingFlag), sizeof(net_sid));
     packet->sid = ntohl(net_sid);
 
-    // todo: decrypt_using_sh_cr()
+    // decrypt using sh_cr
+    auto relay_ptr = known_relays_
+                         ? [&]() -> std::shared_ptr<RelayInfo>{
+                             std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
+                             for(const auto& r: known_relays_->all_relays){
+                                 if(r.session_id == packet->sid){
+                                     return std::make_shared<RelayInfo>(r);
+                                 }
+                             }
+                             return nullptr;
+                         }()
+                         : nullptr;
+
+    if(relay_ptr && packet->sid != static_cast<session_id_t>(-1)){
+        size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
+        crypto::decrypt_layer_cr(relay_ptr->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
+    }
 
     TransitHeader thdr{};
     std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), TRANSIT_HDR_SZ);
@@ -659,7 +701,12 @@ incoming packet:
         return true;
     }
 
-    // todo: decrypt_using_sh_ce()
+    // decrypt using sh_ce
+    auto ci = sid_ci_umap_.get(packet->sid);
+    if(ci){
+        size_t inner_cipher_len = packet->bytes_received - min_hdr_sz;
+        crypto::decrypt_layer_ce(ci->sh_ce, packet->payload.data() + min_hdr_sz, inner_cipher_len);
+    }
 
     constexpr size_t min_data_sz = sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;
     if(packet->bytes_received < min_data_sz){
@@ -834,7 +881,8 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
                                                         const uint16_t our_port,
                                                         const asio::ip::address_v4& dest_address_v4,
                                                         const uint16_t dest_port,
-                                                        bool default_circuit){
+                                                        bool default_circuit,
+                                                        const std::array<uint8_t, 32>& pubkey){
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeReq));
     size_t offset = 0;
 
@@ -886,6 +934,7 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
     req.dest_ipv4 = htonl(dest_address_v4.to_uint());
     req.dest_port = dest_port;
     req.default_circuit = default_circuit;
+    std::memcpy(req.public_key, pubkey.data(), sizeof(req.public_key));
     std::memcpy(buf.data() + offset, &req, sizeof(ExitHandshakeReq));
 
     return buf;

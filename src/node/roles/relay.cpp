@@ -1,5 +1,6 @@
 #include "src/node/roles/relay.hpp"
 #include "src/network/comms/control.hpp"
+#include "src/encryption/encryption.hpp"
 
 #include <quill/LogMacros.h>
 #include <quill/Frontend.h>
@@ -75,7 +76,16 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, size<5.");
         return;
     }
-    // todo: decrypt(packet->payload + sizeof(session_id), exit_info->sh_cr);
+
+    // decrypt(packet->payload + sizeof(session_id), exit_info->sh_cr)
+    if(packet->sid != static_cast<session_id_t>(-1)){
+        auto client_info = sid_ci_umap_.get(packet->sid);
+        if(client_info){
+            crypto::decrypt_layer_cr(client_info->sh_cr, packet->payload.data() + packet->start_offset, packet->payload_bytes);
+        }
+    }
+
+
     if(!parse_cid_from_client(packet)){
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, unable to find cid.");
         return;
@@ -92,7 +102,7 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
 }
 
 
-static std::vector<uint8_t> make_relay_handshake_rep_pakcet(const session_id_t sid, const ControlHeader& chdr){
+static std::vector<uint8_t> make_relay_handshake_rep_pakcet(const session_id_t sid, const ControlHeader& chdr, const crypto::PubKey256& pubkey){
     std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayHandshakeRes));
     size_t offset = 0;
 
@@ -120,7 +130,9 @@ static std::vector<uint8_t> make_relay_handshake_rep_pakcet(const session_id_t s
     std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
     offset += CONTROL_HDR_SZ;
 
-    constexpr RelayHandshakeRes res{};
+    RelayHandshakeRes res{};
+    res.session_id_res = sid;
+    std::memcpy(res.public_key, pubkey.data(), sizeof(res.public_key));
     std::memcpy(resp_buf.data() + offset, &res, sizeof(RelayHandshakeRes));
 
     return resp_buf;
@@ -189,9 +201,19 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
             LOG_INFO(logger_, "HANDSHAKE: {}, endpoint: {}:{}", requested_sid, sender_endpoint.address().to_string(), sender_endpoint.port());
 
+            crypto::EphemeralDH dh;
+            crypto::Key256 sh_cr{};
+            crypto::PubKey256 peer_pubkey{};
+            std::memcpy(peer_pubkey.data(), req.public_key, sizeof(peer_pubkey));
+            if(!dh.compute_shared_secret(peer_pubkey, sh_cr)){
+                LOG_ERROR(logger_, "Relay failed to compute shared secret SH_CR with client");
+                return;
+            }
+
             const ClientInfo cinfo{
                 .session_id = requested_sid,
-                .endpoint   = sender_endpoint
+                .endpoint   = sender_endpoint,
+                .sh_cr      = sh_cr
             };
             // exit information is not yet confirmed.
             sid_ci_umap_.put_if_absent(requested_sid, cinfo);
@@ -200,14 +222,14 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             if(known_relays_){
                 auto& mut = known_relays_->registry_mutex_;
                 std::lock_guard<std::mutex> lock(mut);
-                auto rinfo = RelayInfo{.session_id = requested_sid, .endpoint = sender_endpoint};
+                auto rinfo = RelayInfo{.session_id = requested_sid, .endpoint = sender_endpoint, .sh_cr = sh_cr};
                 known_relays_->all_relays.insert(rinfo);
                 if(!known_relays_->usable_relays.contains(rinfo) && is_relay_diverse(rinfo.endpoint, known_relays_->usable_relays)){
                     known_relays_->usable_relays.insert(rinfo);
                 }
             }
 
-            auto resp_buf = make_relay_handshake_rep_pakcet(requested_sid, chdr);
+            auto resp_buf = make_relay_handshake_rep_pakcet(requested_sid, chdr, dh.public_key());
 
             const auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
             auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
@@ -443,7 +465,8 @@ void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
     }
     packet->sid = htonl(client_info->session_id);
 
-    // todo: encrypt(packet->payload + sizeof(circuit_id_t), client_info->sh_cr);
+    // encrypt(packet->payload + sizeof(circuit_id_t), client_info->sh_cr);
+    crypto::encrypt_layer_cr(client_info->sh_cr, packet->payload.data() + packet->start_offset, packet->payload_bytes);
 
     /*
     incoming packet:

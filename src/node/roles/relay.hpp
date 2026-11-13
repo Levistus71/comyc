@@ -14,14 +14,14 @@ namespace asio = boost::asio;
 
 struct ExitInfo{
     asio::ip::udp::endpoint endpoint;
-    // sh_cr
+    std::array<uint8_t, 32> sh_cr{};
 };
 
 
 struct ClientInfo{
     session_id_t session_id;
     asio::ip::udp::endpoint endpoint;
-    // sh_cr
+    std::array<uint8_t, 32> sh_cr{};
 };
 
 

@@ -132,7 +132,7 @@ private:
     std::mutex utun_write_mtx_;
     std::deque<ArenaSlot<IncomingCell>> utun_write_queue_;
     bool utun_writing_{false};
-    std::atomic<size_t> relay_rr_counter_{0};   // todo: move this to per-circuit counter
+    std::atomic<size_t> relay_rr_counter_{0}; // todo: move this to per-circuit counter
 
     quill::Logger* logger_{nullptr};
 
@@ -170,7 +170,8 @@ private:
                                                            uint16_t our_port,
                                                            const asio::ip::address_v4& dest_address_v4,
                                                            uint16_t dest_port,
-                                                           bool default_circuit);
+                                                           bool default_circuit,
+                                                           const std::array<uint8_t, 32>& pubkey);
 
 
     void compute_new_nt_ci(std::shared_ptr<OngoingCircuitCalcInfo> cci);
@@ -185,7 +186,7 @@ private:
     std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);
 
 
-    [[nodiscard]] static bool parse_incoming_packet(const ArenaSlot<IncomingCell>& packet);
+    [[nodiscard]] bool parse_incoming_packet(const ArenaSlot<IncomingCell>& packet);
 
 
     void handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) const;

@@ -130,7 +130,7 @@ private:
     std::shared_ptr<RelayInfo> choose_relay(const std::shared_ptr<CircuitInfo>& ci);
 
 
-    [[nodiscard]] static bool parse_thdr_incoming_packet(const ArenaSlot<IncomingCell>& packet);
+    [[nodiscard]] bool parse_headers_incoming_packet(const ArenaSlot<IncomingCell>& packet);
 
 
     void handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio::ip::udp::endpoint& relay_endpoint);
@@ -139,7 +139,8 @@ private:
     static std::vector<uint8_t> make_exit_handshake_resp_packet(const ControlHeader& chdr,
                                                                 circuit_id_t cid,
                                                                 sequence_id_t seq_id,
-                                                                uint64_t reorder_buffer_size);
+                                                                uint64_t reorder_buffer_size,
+                                                                const std::array<uint8_t, 32>& pubkey);
 
 
     void insert_into_rob(ArenaSlot<IncomingCell> packet);

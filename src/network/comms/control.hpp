@@ -128,21 +128,21 @@ constexpr size_t CONTROL_HDR_SZ = sizeof(ControlHeader);
 
 struct RelayHandshakeReq{
     session_id_t session_id_req;
-    // todo: encryption stuff
+    uint8_t public_key[32];
 };
 
 
-static_assert(sizeof(RelayHandshakeReq) == 4, "RelayHandshakeReq layout broken");
+static_assert(sizeof(RelayHandshakeReq) == 36, "RelayHandshakeReq layout broken");
 static_assert(std::is_trivially_copyable_v<RelayHandshakeReq>, "RelayHandshakeReq not memcpy safe");
 
 
 struct RelayHandshakeRes{
     session_id_t session_id_res;
-    // todo: encryption stuff
+    uint8_t public_key[32];
 };
 
 
-static_assert(sizeof(RelayHandshakeRes) == 4, "RelayHandshakeRes layout broken");
+static_assert(sizeof(RelayHandshakeRes) == 36, "RelayHandshakeRes layout broken");
 static_assert(std::is_trivially_copyable_v<RelayHandshakeRes>, "RelayHandshakeRes not memcpy safe");
 
 
@@ -225,11 +225,11 @@ struct ExitHandshakeReq{
     circuit_id_t requested_cid;     // 8 bytes: circuit id requested by client
     sequence_id_t start_seq_client; // 8 bytes: start sequence id used by the client
     RelayList relay_list;           // 48 bytes: relay list
-    // todo: encryption
+    uint8_t public_key[32];
 };
 
 
-static_assert(sizeof(ExitHandshakeReq) == 80, "ExitCircuitCreateReq layout broken");
+static_assert(sizeof(ExitHandshakeReq) == 112, "ExitCircuitCreateReq layout broken");
 static_assert(std::is_trivially_copyable_v<ExitHandshakeReq>, "ExitCircuitCreateReq not memcpy safe");
 
 
@@ -239,9 +239,9 @@ struct ExitHandshakeRes{
     uint32_t rob_window_size;     // 4 bytes: window capacity
     uint8_t status_code;          // 1 byte:  0 = ok, 1 = error
     uint8_t _reserved_[3];        // 3 bytes: padding
-    // todo: encryption
+    uint8_t public_key[32];
 };
 
 
-static_assert(sizeof(ExitHandshakeRes) == 24, "ExitCircuitCreateRes layout broken");
+static_assert(sizeof(ExitHandshakeRes) == 56, "ExitCircuitCreateRes layout broken");
 static_assert(std::is_trivially_copyable_v<ExitHandshakeRes>, "ExitCircuitCreateRes not memcpy safe");

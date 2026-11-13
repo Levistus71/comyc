@@ -434,8 +434,8 @@ struct RelayInfo{
     // we need it to be mutable for establish_connection(const RelayInfo&,...);
     mutable session_id_t session_id; // -1 : not connected, anything else: connected
     asio::ip::udp::endpoint endpoint;
-    // relay performance
-    // sh_cr
+    // todo: relay performance
+    mutable std::array<uint8_t, 32> sh_cr{};
 
     bool operator==(const RelayInfo& other) const{
         return endpoint == other.endpoint;
@@ -537,7 +537,7 @@ struct CircuitInfo{
 
     std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
 
-    // sh_ce
+    std::array<uint8_t, 32> sh_ce{};
     std::shared_ptr<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>> reorder_buffer;
     std::optional<NetworkTuple> nt; // nullopt -> default circuit
 
@@ -622,9 +622,9 @@ inline bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unord
     const uint32_t candidate_ip = ep.address().to_v4().to_uint();
     const uint32_t candidate_subnet = candidate_ip & 0xFFFF0000; // /16 mask
 
-    for(const auto& [session_id, endpoint]: existing_relays){
-        if(endpoint.address().is_v4()){
-            const uint32_t existing_ip = endpoint.address().to_v4().to_uint();
+    for(const auto& relay: existing_relays){
+        if(relay.endpoint.address().is_v4()){
+            const uint32_t existing_ip = relay.endpoint.address().to_v4().to_uint();
             if(const uint32_t existing_subnet = existing_ip & 0xFFFF0000; candidate_subnet == existing_subnet){
                 return false; // reject nodes sharing the same /16 subnet
             }
