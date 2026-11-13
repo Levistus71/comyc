@@ -8,7 +8,6 @@
 #include <chrono>
 
 #include <boost/asio/experimental/awaitable_operators.hpp>
-#include <sys/proc.h>
 
 #include "quill/LogMacros.h"
 #include "quill/Frontend.h"
@@ -182,7 +181,7 @@ void Node::stop(){
     }
 }
 
-
+// todo: known_relay lock (since it's called from start() right now, its safe, it might not be in the future)
 asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInfoGlb> known_relays,
                                                        RelayInfo start_relay,
                                                        std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
@@ -219,6 +218,15 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
             LOG_INFO(logger, "trying to establish connection new relay");
             if(co_await establish_connection(current, udp_sockv4, known_relays, logger))
                 continue;
+            auto it = known_relays->all_relays.find(current);
+            if(it != known_relays->all_relays.end()){
+                it->session_id = current.session_id;
+                it->sh_cr = current.sh_cr;
+            }
+            else{
+                LOG_DEBUG(logger, "logic error");
+                known_relays->all_relays.insert(current);
+            }
         }
 
         if(!known_relays->usable_relays.contains(current) && is_relay_diverse(current.endpoint, known_relays->usable_relays)){
@@ -333,7 +341,7 @@ std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay, txn_
     TransitHeader thdr{};
     thdr.circuit_id = static_cast<circuit_id_t>(-1);
     thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelayListReq));
-    thdr.flags = 1;
+    thdr.flags = static_cast<std::underlying_type_t<ThdrFlag>>(ThdrFlag::CONTROL);
     thdr.payload_tier = PayloadTier::TIER_64;
     std::memcpy(buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
     offset += TRANSIT_HDR_SZ;
@@ -365,9 +373,6 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
 
     txn_id_t txn_id = RandomGen::gen_txn_id();
     auto request_packet = make_request_relay_list_packet(relay, txn_id);
-
-    auto timeout = UDP_Comms_Settings::start_timeout;
-    auto executor = co_await asio::this_coro::executor;
 
     // encrypt
     {

@@ -6,8 +6,6 @@
 #include <quill/Frontend.h>
 
 #include <utility>
-#include <sys/proc.h>
-#include <sys/proc.h>
 
 
 Relay::Relay(asio::io_context& ioc,
@@ -69,6 +67,7 @@ outgoing packet:
     TransitHeader thdr{};
     std::memcpy(&thdr, packet->payload.data() + packet->start_offset, TRANSIT_HDR_SZ);
     packet->cid = thdr.circuit_id;
+    packet->control_packet = packet->cid == static_cast<circuit_id_t>(-1) || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL);
     return true;
 }
 
@@ -94,7 +93,8 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
         return;
     }
 
-    if(packet->cid == static_cast<circuit_id_t>(-1)){
+    if(packet->control_packet){
+        LOG_DEBUG(logger_, "control packet, packet_cid : {} | -1: {}", packet->cid, static_cast<circuit_id_t>(-1));
         const uint8_t* control_data = packet->payload.data() + packet->start_offset + TRANSIT_HDR_SZ;
         const size_t control_len = packet->payload_bytes - TRANSIT_HDR_SZ;
         if(client_info){

@@ -674,7 +674,15 @@ incoming packet:
     packet->sid = net_sid;
 
     // decrypt using sh_cr
-    auto relay_ptr = known_relays_
+    // todo: avoid using sid_ci_umap_ twice (insert_into_rob)
+    auto circuit_info = sid_ci_umap_.get(packet->sid);
+
+    // control messages maybe
+    if(!circuit_info){
+        LOG_DEBUG(logger_, "circuit information was not found for sid: {}", packet->sid);
+        LOG_DEBUG(logger_, "trying new circuits.");
+        // todo: use another map instead of iterating
+        auto relay_ptr = known_relays_
                          ? [&]() -> std::shared_ptr<RelayInfo>{
                              std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
                              for(const auto& r: known_relays_->all_relays){
@@ -683,13 +691,14 @@ incoming packet:
                                  }
                              }
                              return nullptr;
-                         }()
-                         : nullptr;
+        }()
+        : nullptr;
 
-    if(relay_ptr && packet->sid != static_cast<session_id_t>(-1)){
-        LOG_DEBUG(logger_, "decrypting...");
-        size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
-        crypto::decrypt_layer_cr(relay_ptr->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
+        if(relay_ptr && packet->sid != static_cast<session_id_t>(-1)){
+            LOG_DEBUG(logger_, "decrypting...");
+            size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
+            crypto::decrypt_layer_cr(relay_ptr->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
+        }
     }
 
     TransitHeader thdr{};
@@ -703,10 +712,7 @@ incoming packet:
         packet->control_packet = true;
         return true;
     }
-
-    if(packet->cid != static_cast<circuit_id_t>(-1) && thdr.flags!=static_cast<uint16_t>(ThdrFlag::CONTROL)){
-        LOG_DEBUG(logger_, "not control flag.");
-    }
+    LOG_DEBUG(logger_, "not control message.");
 
     // decrypt using sh_ce
     auto ci = sid_ci_umap_.get(packet->sid);
