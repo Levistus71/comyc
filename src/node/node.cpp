@@ -179,6 +179,8 @@ void Node::stop(){
     if(ec){
         LOG_ERROR(logger_, "Error closing udp socket v6: {}", ec.message());
     }
+
+    LOG_INFO(logger_, "Stopped.");
 }
 
 // todo: known_relay lock (since it's called from start() right now, its safe, it might not be in the future)
@@ -548,6 +550,10 @@ void Node::listenv6(ArenaSlot<IncomingCell> packet){
 
 void Node::loop_listen(ArenaSlot<IncomingCell> packet, const boost::system::error_code& ec, bool ipv4){
     if(ec){
+        if(ec.message()=="Operation canceled"){
+            LOG_INFO(logger_, "Stopped listening.");
+            return;
+        }
         LOG_ERROR(logger_, "Packet receive failed in loop_listen(): {}", ec.message());
         return;
     }

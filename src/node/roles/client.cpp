@@ -434,6 +434,8 @@ void Client::stop(){
     utun_.stop();
 
     // TODO: signal relays/exit
+
+    LOG_INFO(logger_, "Stopped.");
 }
 
 
@@ -607,7 +609,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         LOG_INFO(logger_, "Derived shared secret SH_CE with exit successfully");
 
         exit_start_seq = response.start_seq_exit;
-        LOG_INFO(logger_, "Setup relay for exit.");
+        LOG_INFO(logger_, "Setup connection for exit.");
     }
     else{
         LOG_ERROR(logger_, "Couldn't connect to exit : {}", std::get<Node::CommError>(res).what());

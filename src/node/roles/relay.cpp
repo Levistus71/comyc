@@ -30,6 +30,7 @@ void Relay::start() const{
 
 void Relay::stop(){
     // todo: signal clients about exit
+    LOG_INFO(logger_, "Stopped.");
 }
 
 

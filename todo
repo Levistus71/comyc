@@ -3,3 +3,5 @@
 
 -> exit encryption: client should already know exit's public ip
     use that to encrypt handshake too.
+
+-> relays connection all at once in background (IMPORTANT)
