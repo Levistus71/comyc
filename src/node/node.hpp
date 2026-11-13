@@ -102,7 +102,8 @@ public:
     static asio::awaitable<CommError> populate_relays(std::shared_ptr<RelaysInfoGlb> known_relays,
                                                       RelayInfo start_relay,
                                                       std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
-                                                      quill::Logger* logger);
+                                                      quill::Logger* logger,
+                                                      std::shared_ptr<Client> client);
 
 
     /* ALWAYS COAWAIT THIS FUNCTION, RELAY PASSED IN BY REFERENCE */

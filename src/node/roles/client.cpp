@@ -80,6 +80,14 @@ Client::~Client(){
 }
 
 
+void Client::update_relays(){
+    std::lock_guard lock(known_relays_->registry_mutex_);
+    for(auto& relay_info : known_relays_->all_relays){
+        sid_ri_umap_.put_if_absent(relay_info.session_id, std::make_shared<RelayInfo>(relay_info));
+    }
+}
+
+
 [[nodiscard]] asio::awaitable<bool> Client::start(bool hijack_system_traffic, bool act_dead){
     if(bool expected = false; running_.compare_exchange_strong(expected, true) == false){
         LOG_ERROR(logger_, "Called start() more than once.");
@@ -497,9 +505,6 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
                     continue;
                 }
 
-                // update sid_ri_umap_
-                sid_ri_umap_.put_if_absent(rinfo->session_id, rinfo);
-
                 LOG_INFO(logger_, "Setup relay for exit.");
                 added_relays++;
                 selected_relays.push_back(rinfo);
@@ -677,13 +682,18 @@ incoming packet:
 
     // decrypt using sh_cr
     auto relay_info = sid_ri_umap_.get(packet->sid);
-    if(relay_info && packet->sid != static_cast<session_id_t>(-1)){
+    if(relay_info){
         LOG_DEBUG(logger_, "decrypting...");
         size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
         crypto::decrypt_layer_cr(relay_info->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
     }
     else{
-        LOG_DEBUG(logger_, "did not decrypt, control/handshake message maybe.");
+        if(packet->sid == static_cast<session_id_t>(-1))
+            LOG_DEBUG(logger_, "did not decrypt, control message with sid = -1");
+        else{
+            LOG_DEBUG(logger_, "sid: {}, did not find in sid_ri_umap_", packet->sid);
+            // return false;
+        }
     }
 
     TransitHeader thdr{};

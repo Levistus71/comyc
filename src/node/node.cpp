@@ -128,7 +128,7 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
                 co_return false;
             }
             LOG_INFO(logger_, "Successfully connected to Bill Turner (bootstrap)");
-            co_await populate_relays(relays_info_glb_, bootstrap_node_, udp_socketv4_, logger_);
+            co_await populate_relays(relays_info_glb_, bootstrap_node_, udp_socketv4_, logger_, client_);
         }
     }
 
@@ -185,7 +185,8 @@ void Node::stop(){
 asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInfoGlb> known_relays,
                                                        RelayInfo start_relay,
                                                        std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
-                                                       quill::Logger* logger){
+                                                       quill::Logger* logger,
+                                                       std::shared_ptr<Client> client){
     if(!known_relays)
         co_return CommError(true, "known_relays is nullptr");
     if(start_relay.session_id == std::numeric_limits<session_id_t>::max())
@@ -233,6 +234,9 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
             known_relays->usable_relays.insert(current);
         }
 
+        client->update_relays();
+
+
         LOG_INFO(logger, "requesting relay list from: {}:{}, session_id: {}",
                  current.endpoint.address().to_string(), current.endpoint.port(), current.session_id);
         std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays, logger);
@@ -278,6 +282,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
         usable_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", relay.session_id, relay.endpoint.address().to_string(), relay.endpoint.port());
     }
 
+    client->update_relays();
     LOG_INFO(logger, "Populated Relays Summary:\nAll Known Relays:{}\nUsable (Connected) Relays:{}", known_str, usable_str);
 
     co_return CommError(false);
