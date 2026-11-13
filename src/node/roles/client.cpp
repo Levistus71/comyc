@@ -445,21 +445,6 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         LOG_INFO(logger_, "Starting making default circuit.");
     }
 
-    LOG_INFO(logger_, "All known relays size: {}", known_relays_->all_relays.size());
-    LOG_INFO(logger_, "Usable relays size: {}", known_relays_->usable_relays.size());
-
-    {
-        std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
-        LOG_DEBUG(logger_, "all relays:");
-        for(const auto& rinfo: known_relays_->all_relays){
-            LOG_DEBUG(logger_, "\t {}:{}", rinfo.endpoint.address().to_string(), rinfo.endpoint.port());
-        }
-        LOG_DEBUG(logger_, "usable relays:");
-        for(const auto& rinfo: known_relays_->usable_relays){
-            LOG_DEBUG(logger_, "\t {}:{}", rinfo.endpoint.address().to_string(), rinfo.endpoint.port());
-        }
-    }
-
     std::vector<std::shared_ptr<RelayInfo>> relay_list;
     if(known_relays_){
         std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
@@ -487,6 +472,12 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
             auto setup_packet = make_relay_setup_exit_req_packet(rinfo->session_id, exit_ep, txn_id, assigned_cid);
             auto sock = (rinfo->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
+            // encrypt
+            {
+                auto hdr_size = sizeof(RoutingFlag) + sizeof(session_id_t);
+                crypto::encrypt_layer_cr(rinfo->sh_cr, setup_packet.data() + hdr_size, setup_packet.size() - hdr_size);
+            }
+
             LOG_INFO(logger_, "Trying to setup exit info with relay : {}", rinfo->to_string());
 
             auto res = co_await Node::control_send_and_wait_udp(sock, setup_packet, rinfo->endpoint, txn_id, known_relays_, logger_);
@@ -505,6 +496,9 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
                     LOG_INFO(logger_, "Couldn't setup relay for exit : status : {}", response.status);
                     continue;
                 }
+
+                // update sid_ri_umap_
+                sid_ri_umap_.put_if_absent(rinfo->session_id, rinfo);
 
                 LOG_INFO(logger_, "Setup relay for exit.");
                 added_relays++;
@@ -562,6 +556,14 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         // default circuit
         create_packet = make_exit_handshake_packet(primary_relay->session_id, assigned_cid, txn_id, our_start_seq, selected_relays,
                                                    default_vpn_v4_, 0, asio::ip::address_v4(), 0, true, dh.public_key());
+    }
+
+    // encrypt
+    // fixme: client should already know exit's key
+    {
+        // only the relay part, exit is not setup yet.
+        auto hdr_size = sizeof(RoutingFlag) + sizeof(session_id_t);
+        crypto::encrypt_layer_cr(primary_relay->sh_cr, create_packet.data() + hdr_size, create_packet.size() - hdr_size);
     }
 
     auto sock = (primary_relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
@@ -674,31 +676,14 @@ incoming packet:
     packet->sid = net_sid;
 
     // decrypt using sh_cr
-    // todo: avoid using sid_ci_umap_ twice (insert_into_rob)
-    auto circuit_info = sid_ci_umap_.get(packet->sid);
-
-    // control messages maybe
-    if(!circuit_info){
-        LOG_DEBUG(logger_, "circuit information was not found for sid: {}", packet->sid);
-        LOG_DEBUG(logger_, "trying new circuits.");
-        // todo: use another map instead of iterating
-        auto relay_ptr = known_relays_
-                         ? [&]() -> std::shared_ptr<RelayInfo>{
-                             std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
-                             for(const auto& r: known_relays_->all_relays){
-                                 if(r.session_id == packet->sid){
-                                     return std::make_shared<RelayInfo>(r);
-                                 }
-                             }
-                             return nullptr;
-        }()
-        : nullptr;
-
-        if(relay_ptr && packet->sid != static_cast<session_id_t>(-1)){
-            LOG_DEBUG(logger_, "decrypting...");
-            size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
-            crypto::decrypt_layer_cr(relay_ptr->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
-        }
+    auto relay_info = sid_ri_umap_.get(packet->sid);
+    if(relay_info && packet->sid != static_cast<session_id_t>(-1)){
+        LOG_DEBUG(logger_, "decrypting...");
+        size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
+        crypto::decrypt_layer_cr(relay_info->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
+    }
+    else{
+        LOG_DEBUG(logger_, "did not decrypt, control/handshake message maybe.");
     }
 
     TransitHeader thdr{};

@@ -87,6 +87,11 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
         }
     }
 
+    if(client_info)
+        LOG_DEBUG(logger_, "found sid in sid_ci_umap_");
+    else
+        LOG_DEBUG(logger_, "did not find sid in sid_ci_umap_");
+
 
     if(!parse_cid_from_client(packet)){
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, unable to find cid.");
@@ -181,7 +186,7 @@ static std::vector<uint8_t> make_relay_list_rep_packet(const session_id_t sid, c
 
 
 void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint,
-    std::array<uint8_t, 32>& sh_cr){
+                                       std::array<uint8_t, 32>& sh_cr){
     if(len < CONTROL_HDR_SZ){
         LOG_ERROR(logger_, "Dropping control packet from client: length too small ({})", len);
         return;
@@ -208,7 +213,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             auto requested_sid = req.session_id_req;
 
             LOG_INFO(logger_, "HANDSHAKE: {}, endpoint: {}:{}, session_id: {}",
-                requested_sid, sender_endpoint.address().to_string(), sender_endpoint.port(), requested_sid);
+                     requested_sid, sender_endpoint.address().to_string(), sender_endpoint.port(), requested_sid);
 
             crypto::EphemeralDH dh;
             crypto::Key256 sh_cr{};

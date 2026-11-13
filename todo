@@ -1,2 +1,5 @@
 -> random number generation clash (reject if already using)
     attack surface
+
+-> exit encryption: client should already know exit's public ip
+    use that to encrypt handshake too.
