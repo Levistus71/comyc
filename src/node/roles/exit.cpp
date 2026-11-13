@@ -140,8 +140,9 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
     auto header_buf = std::make_shared<std::array<uint8_t, HEADER_SZ>>();
     size_t offset = 0;
 
-    (*header_buf)[offset] = static_cast<uint8_t>(RoutingFlag::EXIT_TO_RELAY);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::EXIT_TO_RELAY);
+    std::memcpy(header_buf->data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
     TransitHeader thdr{
         .circuit_id   = circuit_info->circuit_id,
@@ -283,7 +284,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                         continue;
                     RelayInfo rinfo;
                     rinfo.session_id = static_cast<session_id_t>(-1);
-                    rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(ntohl(relay.ipv4)), ntohs(relay.port));
+                    rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(relay.ipv4), relay.port);
                     relays.push_back(std::make_shared<RelayInfo>(rinfo));
                 }
 
@@ -303,7 +304,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
 
             // update sant_nt_ci_umap_/nt_ci_umap_ (assign virtual ip to client, use that for nt_ci)
             {
-                asio::ip::address_v4 client_req_private_ip = asio::ip::make_address_v4(ntohl(req.client_ipv4));
+                asio::ip::address_v4 client_req_private_ip = asio::ip::make_address_v4(req.client_ipv4);
 
                 if(req.default_circuit){
                     SrcAddrNetworkTuple nt{
@@ -312,7 +313,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                     sant_ci_umap_.put_if_absent(nt, ci);
                 }
                 else{
-                    asio::ip::address_v4 destinatation_ip = asio::ip::make_address_v4(ntohl(req.dest_ipv4));
+                    asio::ip::address_v4 destinatation_ip = asio::ip::make_address_v4(req.dest_ipv4);
                     uint16_t client_port = req.client_port;
                     uint16_t dest_port = req.dest_port;
 
@@ -359,8 +360,9 @@ std::vector<uint8_t> Exit::make_exit_handshake_resp_packet(const ControlHeader& 
     std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeRes));
     size_t offset = 0;
 
-    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::EXIT_TO_RELAY);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::EXIT_TO_RELAY);
+    std::memcpy(resp_buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
     TransitHeader resp_thdr{};
     resp_thdr.circuit_id = cid;
@@ -439,10 +441,10 @@ circuit_id is at the start
 
     if(packet->payload_bytes > 0){
         const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
-        packet->ip_version_macos = (ip_ver == 6) ? htonl(AF_INET6) : htonl(AF_INET);
+        packet->ip_version_macos = (ip_ver == 6) ? AF_INET6 : AF_INET;
     }
     else{
-        packet->ip_version_macos = htonl(AF_INET);
+        packet->ip_version_macos = AF_INET;
     }
 
     return true;

@@ -58,7 +58,8 @@ private:
     quill::Logger* logger_{nullptr};
 
 
-    void handle_control_from_client(session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint);
+    void handle_control_from_client(session_id_t sid, const uint8_t* data, size_t len,
+                                    const asio::ip::udp::endpoint& sender_endpoint, std::array<uint8_t, 32>& sh_cr);
 
 
     static std::vector<uint8_t> make_relay_setup_exit_res_packet(session_id_t sid, const ControlHeader& chdr, const RelaySetupExitRes& res);

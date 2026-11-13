@@ -6,6 +6,8 @@
 #include <quill/Frontend.h>
 
 #include <utility>
+#include <sys/proc.h>
+#include <sys/proc.h>
 
 
 Relay::Relay(asio::io_context& ioc,
@@ -49,7 +51,7 @@ outgoing packet:
 
     uint32_t net_sid = 0;
     std::memcpy(&net_sid, packet->payload.data() + sizeof(RoutingFlag), sizeof(net_sid));
-    packet->sid = ntohl(net_sid);
+    packet->sid = net_sid;
 
     packet->outgoing_bytes = packet->bytes_received - sizeof(session_id_t);
     packet->payload_bytes = packet->bytes_received - sizeof(RoutingFlag) - sizeof(session_id_t);
@@ -78,8 +80,9 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
     }
 
     // decrypt(packet->payload + sizeof(session_id), exit_info->sh_cr)
+    std::shared_ptr<ClientInfo> client_info = nullptr;
     if(packet->sid != static_cast<session_id_t>(-1)){
-        auto client_info = sid_ci_umap_.get(packet->sid);
+        client_info = sid_ci_umap_.get(packet->sid);
         if(client_info){
             crypto::decrypt_layer_cr(client_info->sh_cr, packet->payload.data() + packet->start_offset, packet->payload_bytes);
         }
@@ -94,7 +97,13 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
     if(packet->cid == static_cast<circuit_id_t>(-1)){
         const uint8_t* control_data = packet->payload.data() + packet->start_offset + TRANSIT_HDR_SZ;
         const size_t control_len = packet->payload_bytes - TRANSIT_HDR_SZ;
-        handle_control_from_client(packet->sid, control_data, control_len, sender_endpoint);
+        if(client_info){
+            handle_control_from_client(packet->sid, control_data, control_len, sender_endpoint, client_info->sh_cr);
+        }
+        else{
+            std::array<uint8_t, 32> v{};
+            handle_control_from_client(packet->sid, control_data, control_len, sender_endpoint, v);
+        }
         return;
     }
 
@@ -106,18 +115,17 @@ static std::vector<uint8_t> make_relay_handshake_rep_pakcet(const session_id_t s
     std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayHandshakeRes));
     size_t offset = 0;
 
-    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::RELAY_TO_CLIENT);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::RELAY_TO_CLIENT);
+    std::memcpy(resp_buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
-    for(size_t i = 0; i < sizeof(session_id_t); i++){
-        resp_buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
-    }
+    std::memcpy(resp_buf.data() + offset, &sid, sizeof(session_id_t));
     offset += sizeof(session_id_t);
 
     TransitHeader thdr{};
     thdr.circuit_id = static_cast<circuit_id_t>(-1);
     thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelayHandshakeRes));
-    thdr.flags = 1;
+    thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
     thdr.payload_tier = PayloadTier::TIER_64;
     std::memcpy(resp_buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
     offset += TRANSIT_HDR_SZ;
@@ -143,18 +151,17 @@ static std::vector<uint8_t> make_relay_list_rep_packet(const session_id_t sid, c
     std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayListRes));
     size_t offset = 0;
 
-    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::RELAY_TO_CLIENT);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::RELAY_TO_CLIENT);
+    std::memcpy(resp_buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
-    for(size_t i = 0; i < sizeof(session_id_t); i++){
-        resp_buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
-    }
+    std::memcpy(resp_buf.data() + offset, &sid, sizeof(session_id_t));
     offset += sizeof(session_id_t);
 
     TransitHeader thdr{};
     thdr.circuit_id = static_cast<circuit_id_t>(-1);
     thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(RelayListRes));
-    thdr.flags = 1;
+    thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
     thdr.payload_tier = PayloadTier::TIER_64;
     std::memcpy(resp_buf.data() + offset, &thdr, TRANSIT_HDR_SZ);
     offset += TRANSIT_HDR_SZ;
@@ -173,7 +180,8 @@ static std::vector<uint8_t> make_relay_list_rep_packet(const session_id_t sid, c
 }
 
 
-void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint){
+void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint,
+    std::array<uint8_t, 32>& sh_cr){
     if(len < CONTROL_HDR_SZ){
         LOG_ERROR(logger_, "Dropping control packet from client: length too small ({})", len);
         return;
@@ -199,7 +207,8 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
             auto requested_sid = req.session_id_req;
 
-            LOG_INFO(logger_, "HANDSHAKE: {}, endpoint: {}:{}", requested_sid, sender_endpoint.address().to_string(), sender_endpoint.port());
+            LOG_INFO(logger_, "HANDSHAKE: {}, endpoint: {}:{}, session_id: {}",
+                requested_sid, sender_endpoint.address().to_string(), sender_endpoint.port(), requested_sid);
 
             crypto::EphemeralDH dh;
             crypto::Key256 sh_cr{};
@@ -269,9 +278,13 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
                 for(const auto& rinfo: known_relays_->all_relays){
                     if(populated >= MAX_RELAY_LIST_SZ || populated >= req.relays_requested)
                         break;
+                    if(rinfo.endpoint == sender_endpoint){
+                        // don't send requester's ip to itself
+                        continue;
+                    }
                     if(rinfo.endpoint.address().is_v4()){
-                        res.relays[populated].ipv4 = htonl(rinfo.endpoint.address().to_v4().to_uint());
-                        res.relays[populated].port = htons(rinfo.endpoint.port());
+                        res.relays[populated].ipv4 = rinfo.endpoint.address().to_v4().to_uint();
+                        res.relays[populated].port = rinfo.endpoint.port();
                         res.relays[populated].nat = 0;
                         res.relays[populated].bandwidth_tier = 0;
                         populated++;
@@ -281,6 +294,12 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             res.count = populated;
 
             auto resp_buf = make_relay_list_rep_packet(sid, chdr, res);
+
+            // encrypt
+            {
+                auto hdr_size = sizeof(RoutingFlag) + sizeof(session_id_t);
+                crypto::encrypt_layer_cr(sh_cr, resp_buf.data() + hdr_size, resp_buf.size() - hdr_size);
+            }
 
             auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
             auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
@@ -305,8 +324,8 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             std::memcpy(&req, msg_body, sizeof(RelaySetupExitReq));
 
             asio::ip::udp::endpoint exit_ep(
-                asio::ip::address_v4(ntohl(req.exit_ipv4)),
-                ntohs(req.exit_port)
+                asio::ip::address_v4(req.exit_ipv4),
+                req.exit_port
             );
 
             // update maps
@@ -346,12 +365,11 @@ std::vector<uint8_t> Relay::make_relay_setup_exit_res_packet(const session_id_t 
     std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelaySetupExitRes));
     size_t offset = 0;
 
-    resp_buf[offset] = static_cast<uint8_t>(RoutingFlag::RELAY_TO_CLIENT);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::RELAY_TO_CLIENT);
+    std::memcpy(resp_buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
-    for(size_t i = 0; i < sizeof(session_id_t); i++){
-        resp_buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
-    }
+    std::memcpy(resp_buf.data() + offset, &sid, sizeof(session_id_t));
     offset += sizeof(session_id_t);
 
     TransitHeader thdr{};
@@ -384,7 +402,7 @@ void Relay::process_packet_from_exit(ArenaSlot<IncomingCell> packet){
 void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
     if(exit_info == nullptr){
-        LOG_ERROR(logger_, "Dropping invalid packet, no session_id map found.");
+        LOG_ERROR(logger_, "Dropping invalid packet, no session_id map found for sid: {}, cid:{}", packet->sid, packet->cid);
         return;
     }
 
@@ -463,7 +481,7 @@ void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
         LOG_WARNING(logger_, "Dropping invalid packet, no circuit_id found.");
         return;
     }
-    packet->sid = htonl(client_info->session_id);
+    packet->sid = client_info->session_id;
 
     // encrypt(packet->payload + sizeof(circuit_id_t), client_info->sh_cr);
     crypto::encrypt_layer_cr(client_info->sh_cr, packet->payload.data() + packet->start_offset, packet->payload_bytes);

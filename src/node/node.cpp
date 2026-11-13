@@ -8,6 +8,7 @@
 #include <chrono>
 
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <sys/proc.h>
 
 #include "quill/LogMacros.h"
 #include "quill/Frontend.h"
@@ -127,6 +128,7 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
                 LOG_ERROR(logger_, "failed to talk to Bill Turner (bootstrap): {}", e.what());
                 co_return false;
             }
+            LOG_INFO(logger_, "Successfully connected to Bill Turner (bootstrap)");
             co_await populate_relays(relays_info_glb_, bootstrap_node_, udp_socketv4_, logger_);
         }
     }
@@ -213,13 +215,18 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
         if(current.endpoint.protocol() == asio::ip::udp::v6())
             continue;
 
-        if(co_await establish_connection(current, udp_sockv4, known_relays, logger))
-            continue;
+        if(!current.is_connected()){
+            LOG_INFO(logger, "trying to establish connection new relay");
+            if(co_await establish_connection(current, udp_sockv4, known_relays, logger))
+                continue;
+        }
 
         if(!known_relays->usable_relays.contains(current) && is_relay_diverse(current.endpoint, known_relays->usable_relays)){
             known_relays->usable_relays.insert(current);
         }
 
+        LOG_INFO(logger, "requesting relay list from: {}:{}, session_id: {}",
+                 current.endpoint.address().to_string(), current.endpoint.port(), current.session_id);
         std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays, logger);
 
         // randomize
@@ -275,11 +282,12 @@ std::vector<uint8_t> Node::make_connection_packet(const RelayInfo& relay, txn_id
     size_t offset = 0;
 
     // client to relay flag
-    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::CLIENT_TO_RELAY);
+    std::memcpy(buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
     // session_id = -1
-    std::fill_n(&buf[offset], sizeof(session_id_t), static_cast<uint8_t>(-1));
+    std::fill_n(&buf[offset], sizeof(session_id_t), static_cast<session_id_t>(-1));
     offset += sizeof(session_id_t);
 
     // thdr (circuit_id = -1 for relay control)
@@ -315,12 +323,11 @@ std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay, txn_
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelayListReq));
     size_t offset = 0;
 
-    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::CLIENT_TO_RELAY);
+    std::memcpy(buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
-    for(size_t i = 0; i < sizeof(session_id_t); i++){
-        buf[offset + i] = static_cast<uint8_t>((relay.session_id >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
-    }
+    std::memcpy(buf.data() + offset, &relay.session_id, sizeof(session_id_t));
     offset += sizeof(session_id_t);
 
     TransitHeader thdr{};
@@ -362,6 +369,12 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
     auto timeout = UDP_Comms_Settings::start_timeout;
     auto executor = co_await asio::this_coro::executor;
 
+    // encrypt
+    {
+        auto hdr_size = sizeof(RoutingFlag) + sizeof(session_id_t);
+        crypto::encrypt_layer_cr(relay.sh_cr, request_packet.data() + hdr_size, request_packet.size() - hdr_size);
+    }
+
     auto response = co_await control_send_and_wait_udp(udp_sockv4, request_packet, relay.endpoint, txn_id, relays_info_glb, logger);
 
     if(std::holds_alternative<std::vector<uint8_t>>(response)){
@@ -377,7 +390,7 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
                     continue;
                 RelayInfo rinfo;
                 rinfo.session_id = static_cast<session_id_t>(-1);
-                rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(ntohl(rec.ipv4)), ntohs(rec.port));
+                rinfo.endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(rec.ipv4), rec.port);
                 result_relays.push_back(rinfo);
             }
         }
@@ -395,10 +408,11 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
     if(relay.endpoint.protocol() == asio::ip::udp::v6())
         co_return CommError(true, "relay.endpoint is of type ipv6");
 
-    LOG_INFO(logger, "starting establishing connection");
-
     relay.session_id = RandomGen::gen_session_id();
     const txn_id_t txn_id = RandomGen::gen_txn_id();
+
+    LOG_INFO(logger, "starting establishing connection to {}:{}, session_id: {}",
+             relay.endpoint.address().to_string(), relay.endpoint.port(), relay.session_id);
 
     crypto::EphemeralDH dh;
     if(!dh.initialized){
@@ -544,7 +558,11 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<1.");
         return;
     }
-    packet->route_flag = static_cast<RoutingFlag>(packet->payload[0]);
+
+    using FlagType = std::underlying_type_t<RoutingFlag>;
+    FlagType raw_flag;
+    std::memcpy(&raw_flag, packet->payload.data(), sizeof(FlagType));
+    packet->route_flag = static_cast<RoutingFlag>(raw_flag);
 
     LOG_INFO(logger_, "Received packet from outside, endpoint: {}:{}", endpoint.address().to_string(), endpoint.port());
 

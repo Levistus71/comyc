@@ -469,7 +469,8 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     }
 
     if(relay_list.size() < Settings::DEFAULT_NUM_ENTRY_RELAYS){
-        LOG_INFO(logger_, "Couldn't make new circuit, not enough relays. Tried choosing: {}", relay_list.size());
+        LOG_INFO(logger_, "Couldn't make new circuit, not enough relays. Tried choosing from: {}, needed: {}",
+            relay_list.size(), Settings::DEFAULT_NUM_ENTRY_RELAYS);
         co_return false;
     }
 
@@ -670,7 +671,7 @@ incoming packet:
 
     uint32_t net_sid = 0;
     std::memcpy(&net_sid, packet->payload.data() + sizeof(RoutingFlag), sizeof(net_sid));
-    packet->sid = ntohl(net_sid);
+    packet->sid = net_sid;
 
     // decrypt using sh_cr
     auto relay_ptr = known_relays_
@@ -686,6 +687,7 @@ incoming packet:
                          : nullptr;
 
     if(relay_ptr && packet->sid != static_cast<session_id_t>(-1)){
+        LOG_DEBUG(logger_, "decrypting...");
         size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
         crypto::decrypt_layer_cr(relay_ptr->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
     }
@@ -695,10 +697,15 @@ incoming packet:
     packet->cid = thdr.circuit_id;
 
     if(packet->cid == static_cast<circuit_id_t>(-1) || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)){
+        LOG_DEBUG(logger_, "here.");
         packet->start_offset = min_hdr_sz;
         packet->payload_bytes = packet->bytes_received - min_hdr_sz;
         packet->control_packet = true;
         return true;
+    }
+
+    if(packet->cid != static_cast<circuit_id_t>(-1) && thdr.flags!=static_cast<uint16_t>(ThdrFlag::CONTROL)){
+        LOG_DEBUG(logger_, "not control flag.");
     }
 
     // decrypt using sh_ce
@@ -723,10 +730,10 @@ incoming packet:
 
     if(packet->payload_bytes > 0){
         const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
-        packet->ip_version_macos = (ip_ver == 6) ? htonl(AF_INET6) : htonl(AF_INET);
+        packet->ip_version_macos = (ip_ver == 6) ? AF_INET6 : AF_INET;
     }
     else{
-        packet->ip_version_macos = htonl(AF_INET);
+        packet->ip_version_macos = AF_INET;
     }
 
     return true;
@@ -838,12 +845,11 @@ std::vector<uint8_t> Client::make_relay_setup_exit_req_packet(const session_id_t
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(RelaySetupExitReq));
     size_t offset = 0;
 
-    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::CLIENT_TO_RELAY);
+    std::memcpy(buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
-    for(size_t i = 0; i < sizeof(session_id_t); i++){
-        buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
-    }
+    std::memcpy(buf.data() + offset, &sid, sizeof(session_id_t));
     offset += sizeof(session_id_t);
 
     TransitHeader thdr{};
@@ -864,8 +870,8 @@ std::vector<uint8_t> Client::make_relay_setup_exit_req_packet(const session_id_t
 
     RelaySetupExitReq req{};
     req.circuit_id = circuit_id;
-    req.exit_ipv4 = htonl(exit_ep.address().to_v4().to_uint());
-    req.exit_port = htons(exit_ep.port());
+    req.exit_ipv4 = exit_ep.address().to_v4().to_uint();
+    req.exit_port = exit_ep.port();
     std::memcpy(buf.data() + offset, &req, sizeof(RelaySetupExitReq));
 
     return buf;
@@ -886,12 +892,11 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
     std::vector<uint8_t> buf(sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitHandshakeReq));
     size_t offset = 0;
 
-    buf[offset] = static_cast<uint8_t>(RoutingFlag::CLIENT_TO_RELAY);
-    offset += sizeof(RoutingFlag);
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::CLIENT_TO_RELAY);
+    std::memcpy(buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
 
-    for(size_t i = 0; i < sizeof(session_id_t); i++){
-        buf[offset + i] = static_cast<uint8_t>((sid >> (8 * (sizeof(session_id_t) - 1 - i))) & 0xFF);
-    }
+    std::memcpy(buf.data() + offset, &sid, sizeof(session_id_t));
     offset += sizeof(session_id_t);
 
     TransitHeader thdr{};
@@ -916,8 +921,8 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
         if(populated >= MAX_RELAYS_PER_CIRCUIT)
             break;
         if(rinfo->endpoint.address().is_v4()){
-            relay_list.relays[populated].ipv4 = htonl(rinfo->endpoint.address().to_v4().to_uint());
-            relay_list.relays[populated].port = htons(rinfo->endpoint.port());
+            relay_list.relays[populated].ipv4 = rinfo->endpoint.address().to_v4().to_uint();
+            relay_list.relays[populated].port = rinfo->endpoint.port();
             relay_list.relays[populated].nat = 0;
             relay_list.relays[populated].bandwidth_tier = 0;
             populated++;
@@ -929,9 +934,9 @@ std::vector<uint8_t> Client::make_exit_handshake_packet(const session_id_t sid,
     req.requested_cid = cid;
     req.start_seq_client = our_start_seq;
     req.relay_list = relay_list;
-    req.client_ipv4 = htonl(our_address_v4.to_uint());
+    req.client_ipv4 = our_address_v4.to_uint();
     req.client_port = our_port;
-    req.dest_ipv4 = htonl(dest_address_v4.to_uint());
+    req.dest_ipv4 = dest_address_v4.to_uint();
     req.dest_port = dest_port;
     req.default_circuit = default_circuit;
     std::memcpy(req.public_key, pubkey.data(), sizeof(req.public_key));
