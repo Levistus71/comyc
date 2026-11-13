@@ -106,19 +106,22 @@ void Client::update_relays(){
             std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
             for(auto& rinfo: known_relays_->usable_relays){
                 if(!utun_.add_del_route(true, rinfo.endpoint.address(), prefix_v4)){
-                    LOG_ERROR(logger_, "Failed to add relay {} to utun routes.", rinfo.endpoint.address().to_string());
-                    co_return false;
+                    LOG_ERROR(logger_, "Failed to add relay {} to utun route, maybe local endpoint.", rinfo.endpoint.address().to_string());
                 }
-                LOG_INFO(logger_, "Added relay {} to utun routes.", rinfo.endpoint.address().to_string());
+                else{
+                    LOG_INFO(logger_, "Added relay {} to utun routes.", rinfo.endpoint.address().to_string());
+                }
+
             }
         }
         // add exit routes
         for(auto& ep: exits_){
             if(!utun_.add_del_route(true, ep.address(), prefix_v4)){
-                LOG_ERROR(logger_, "Failed to add exit {} to utun routes.", ep.address().to_string());
-                co_return false;
+                LOG_ERROR(logger_, "Failed to add exit {} to utun routes, maybe local endpoint.", ep.address().to_string());
             }
-            LOG_INFO(logger_, "Added exit {} to utun routes.", ep.address().to_string());
+            else{
+                LOG_INFO(logger_, "Added exit {} to utun routes.", ep.address().to_string());
+            }
         }
     }
 

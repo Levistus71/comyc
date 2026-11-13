@@ -7,6 +7,7 @@ sudo QUILL_LOG_LEVEL=debug ./node -r relay -p 6969 -c -B -l bootstrap_log.txt
 
 client:
 sudo QUILL_LOG_LEVEL=debug ./node -r client-relay -b 127.0.0.1 --bootstrap-port 6969 -j -c --exit-ip 192.168.0.100 --exit-port 8001 -l client_logs.txt
+sudo ../build/node -r client-relay --bootstrap-ip 127.0.0.1 --bootstrap-port 6969 --exit-ip 127.0.0.1 --exit-port 8001 -l ./logs/client_log.txt -c
 
 
 exit:
