@@ -1,0 +1,32 @@
+[INFO] [01:31:31.877195588] [1004045] [Main] [main] [main.cpp:95] Starting node with role: relay, threads: 10, log_file: ./logs/bootstrap_log.txt
+[INFO] [01:31:31.889782390] [1004049] [Main] [operator()] [main.cpp:130] Trying node->start().
+[INFO] [01:31:31.890008305] [1004049] [Node] [start] [node.cpp:118] Started v4 listening on port: 6969
+[INFO] [01:31:31.890012346] [1004049] [Node] [start] [node.cpp:119] Started v6 listening on port: 55023
+[INFO] [01:31:31.890013221] [1004049] [Node] [start] [node.cpp:123] I'm Bootstrap Bill, skipping establish_connection...
+[INFO] [01:31:31.890023114] [1004049] [Client] [start] [client.cpp:98] Started 'dead' client
+[INFO] [01:31:31.890027864] [1004049] [Relay] [start] [relay.cpp:27] Relay starting.
+[INFO] [01:31:31.890070631] [1004049] [Main] [operator()] [main.cpp:134] Node started.
+[INFO] [01:31:34.221593037] [1004047] [Node] [route_packet] [node.cpp:583] Received packet from outside, endpoint: 127.0.0.1:53840
+[INFO] [01:31:34.221650489] [1004047] [Node] [route_packet] [node.cpp:588] processing packet from client, routing to relay.
+[DEBUG] [01:31:34.221653781] [1004047] [Relay] [process_packet_from_client] [relay.cpp:95] did not find sid in sid_ci_umap_
+[DEBUG] [01:31:34.221654781] [1004047] [Relay] [process_packet_from_client] [relay.cpp:104] control packet, packet_cid : 18446744073709551615 | -1: 18446744073709551615
+[INFO] [01:31:34.221660006] [1004047] [Relay] [handle_control_from_client] [relay.cpp:197] Handling control packet from client. Endpoint: 127.0.0.1/53840
+[INFO] [01:31:34.221663089] [1004047] [Relay] [handle_control_from_client] [relay.cpp:217] HANDSHAKE: 715817971, endpoint: 127.0.0.1:53840, session_id: 715817971
+[INFO] [01:31:34.223579697] [1004047] [Relay] [handle_control_from_client] [relay.cpp:258] Sending response packet to endpoint 127.0.0.1 via 0.0.0.0:6969
+[INFO] [01:31:34.225599149] [1004051] [Node] [route_packet] [node.cpp:583] Received packet from outside, endpoint: 127.0.0.1:53840
+[INFO] [01:31:34.225629958] [1004051] [Node] [route_packet] [node.cpp:588] processing packet from client, routing to relay.
+[DEBUG] [01:31:34.225654892] [1004051] [Relay] [process_packet_from_client] [relay.cpp:93] found sid in sid_ci_umap_
+[DEBUG] [01:31:34.225655726] [1004051] [Relay] [process_packet_from_client] [relay.cpp:104] control packet, packet_cid : 18446744073709551615 | -1: 18446744073709551615
+[INFO] [01:31:34.225658892] [1004051] [Relay] [handle_control_from_client] [relay.cpp:197] Handling control packet from client. Endpoint: 127.0.0.1/53840
+[INFO] [01:31:50.821687148] [1004055] [Main] [operator()] [main.cpp:124] Sigint/Sigterm. Stopping Initiated.
+[INFO] [01:31:50.821836445] [1004055] [Main] [operator()] [main.cpp:107] Stopping node and releasing work guard.
+[ERROR] [01:31:50.821859712] [1004055] [Client] [stop] [utun.cpp:114] [UTUN] Called stop() more than once.
+[INFO] [01:31:50.821860962] [1004055] [Client] [stop] [client.cpp:438] Stopped.
+[INFO] [01:31:50.821863003] [1004055] [Relay] [stop] [relay.cpp:33] Stopped.
+[INFO] [01:31:50.821924580] [1004055] [Node] [stop] [node.cpp:183] Stopped.
+[INFO] [01:31:50.821948640] [1004048] [Node] [loop_listen] [node.cpp:554] Stopped listening.
+[INFO] [01:31:50.821973640] [1004050] [Node] [loop_listen] [node.cpp:554] Stopped listening.
+[WARNING] [01:31:53.822112297] [1004052] [Main] [operator()] [main.cpp:114] Graceful shutdown timed out; forcing ioc.stop().
+[INFO] [01:31:53.822277052] [1004045] [Main] [main] [main.cpp:167] Joining all threads.
+[INFO] [01:31:53.822362771] [1004045] [Main] [main] [main.cpp:175] Shut down complete.
+[ERROR] [01:31:53.824806678] [1004045] [Client] [stop] [utun.cpp:114] [UTUN] Called stop() more than once.

@@ -1,0 +1,43 @@
+[INFO] [01:31:34.204155074] [1004116] [Main] [main] [main.cpp:95] Starting node with role: client-relay, threads: 10, log_file: ./logs/client_logs.txt
+[INFO] [01:31:34.217792307] [1004122] [Main] [operator()] [main.cpp:130] Trying node->start().
+[INFO] [01:31:34.218046489] [1004122] [Node] [start] [node.cpp:118] Started v4 listening on port: 53840
+[INFO] [01:31:34.218050114] [1004122] [Node] [start] [node.cpp:119] Started v6 listening on port: 51473
+[INFO] [01:31:34.218080548] [1004122] [Node] [establish_connection] [node.cpp:426] starting establishing connection to 127.0.0.1:6969, session_id: 715817971
+[INFO] [01:31:34.220005239] [1004122] [Node] [establish_connection] [node.cpp:437] trying to connect via udp, max attempts : 5
+[INFO] [01:31:34.221438274] [1004123] [Node] [control_send_and_wait_udp] [node.cpp:490] sent packet number 1, txn_id: 7314, waiting for response
+[INFO] [01:31:34.224159523] [1004120] [Node] [route_packet] [node.cpp:583] Received packet from outside, endpoint: 127.0.0.1:6969
+[INFO] [01:31:34.224186648] [1004120] [Node] [route_packet] [node.cpp:602] processing packet from relay, routing to client.
+[DEBUG] [01:31:34.224204998] [1004120] [Client] [parse_incoming_packet] [client.cpp:696] sid: 715817971, did not find in sid_ri_umap_
+[DEBUG] [01:31:34.224206998] [1004120] [Client] [parse_incoming_packet] [client.cpp:706] here.
+[INFO] [01:31:34.224860034] [1004116] [Node] [control_send_and_wait_udp] [node.cpp:504] received response from packet number 1, txn_id 7314
+[INFO] [01:31:34.224878760] [1004116] [Node] [establish_connection] [node.cpp:441] established connection
+[INFO] [01:31:34.224969021] [1004116] [Node] [establish_connection] [node.cpp:455] Derived shared secret SH_CR with relay successfully
+[INFO] [01:31:34.224974355] [1004116] [Node] [start] [node.cpp:130] Successfully connected to Bill Turner (bootstrap)
+[INFO] [01:31:34.225032931] [1004116] [Node] [populate_relays] [node.cpp:242] requesting relay list from: 127.0.0.1:6969, session_id: 715817971
+[INFO] [01:31:34.225502754] [1004127] [Node] [control_send_and_wait_udp] [node.cpp:490] sent packet number 1, txn_id: 5484, waiting for response
+[INFO] [01:31:34.225872215] [1004126] [Node] [route_packet] [node.cpp:583] Received packet from outside, endpoint: 127.0.0.1:6969
+[INFO] [01:31:34.225895007] [1004126] [Node] [route_packet] [node.cpp:602] processing packet from relay, routing to client.
+[DEBUG] [01:31:34.225897548] [1004126] [Client] [parse_incoming_packet] [client.cpp:688] decrypting...
+[DEBUG] [01:31:34.225910733] [1004126] [Client] [parse_incoming_packet] [client.cpp:706] here.
+[INFO] [01:31:34.226042720] [1004126] [Node] [control_send_and_wait_udp] [node.cpp:504] received response from packet number 1, txn_id 5484
+[INFO] [01:31:34.226091213] [1004126] [Node] [populate_relays] [node.cpp:288] Populated Relays Summary:
+[INFO] [01:31:34.226091213] [1004126] [Node] [populate_relays] [node.cpp:288] All Known Relays:
+[INFO] [01:31:34.226091213] [1004126] [Node] [populate_relays] [node.cpp:288]   - sid: 715817971, endpoint: 127.0.0.1:6969
+[INFO] [01:31:34.226091213] [1004126] [Node] [populate_relays] [node.cpp:288] Usable (Connected) Relays:
+[INFO] [01:31:34.226091213] [1004126] [Node] [populate_relays] [node.cpp:288]   - sid: 715817971, endpoint: 127.0.0.1:6969
+[INFO] [01:31:34.226112898] [1004126] [Client] [make_new_circuit] [client.cpp:455] Starting making default circuit.
+[INFO] [01:31:34.226120023] [1004126] [Client] [make_new_circuit] [client.cpp:467] Couldn't make new circuit, not enough relays. Tried choosing from: 1, needed: 2
+[ERROR] [01:31:34.226125148] [1004126] [Client] [start] [client.cpp:126] Failed to make default circuit.
+[ERROR] [01:31:34.226126273] [1004126] [Node] [start] [node.cpp:137] Client not started.
+[ERROR] [01:31:34.226130398] [1004126] [Main] [operator()] [main.cpp:136] Node couldn't start. Aborting.
+[INFO] [01:31:34.226130856] [1004126] [Main] [operator()] [main.cpp:107] Stopping node and releasing work guard.
+[ERROR] [01:31:34.226136856] [1004126] [Client] [stop] [utun.cpp:114] [UTUN] Called stop() more than once.
+[INFO] [01:31:34.226137189] [1004126] [Client] [stop] [client.cpp:438] Stopped.
+[INFO] [01:31:34.226139439] [1004126] [Relay] [stop] [relay.cpp:33] Stopped.
+[INFO] [01:31:34.226157665] [1004126] [Node] [stop] [node.cpp:183] Stopped.
+[INFO] [01:31:34.226161456] [1004124] [Node] [loop_listen] [node.cpp:554] Stopped listening.
+[INFO] [01:31:34.226224783] [1004125] [Node] [loop_listen] [node.cpp:554] Stopped listening.
+[WARNING] [01:31:37.227248323] [1004121] [Main] [operator()] [main.cpp:114] Graceful shutdown timed out; forcing ioc.stop().
+[INFO] [01:31:37.227474779] [1004116] [Main] [main] [main.cpp:167] Joining all threads.
+[INFO] [01:31:37.227678402] [1004116] [Main] [main] [main.cpp:175] Shut down complete.
+[ERROR] [01:31:37.230549846] [1004116] [Client] [stop] [utun.cpp:114] [UTUN] Called stop() more than once.
