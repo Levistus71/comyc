@@ -293,7 +293,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                     .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
                     .relays           = std::move(relays),
                     .sh_ce            = sh_ce,
-                    .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq),
+                    .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq, logger_),
                     /* not used by exit, compiler warns */
                     .nt               = NetworkTuple::create_exit_nt(asio::ip::address{}, asio::ip::address{}, 0, 0),
                     .activity_counter = {}

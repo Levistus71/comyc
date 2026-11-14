@@ -94,6 +94,7 @@ public:
                                      const asio::ip::address& dest,
                                      const asio::ip::address& netmaskv4_prefixv6,
                                      const asio::ip::address& this_public_ip = asio::ip::make_address("192.168.0.101"));
+                                    // todo: remove 192.168.0.101 here ^
 
 private:
     int utun_fd_ = -1;

@@ -7,10 +7,12 @@
 #include <utility>
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <stdexcept>
 
 #include <boost/asio.hpp>
+
+#include <quill/Logger.h>
+#include <fmt/core.h>
 
 
 namespace asio = boost::asio;
@@ -35,7 +37,9 @@ public:
     explicit ReorderBuffer(asio::io_context& ioc,
                            size_t capacity,
                            seq_t start_seq = 0,
+                           quill::Logger* logger = nullptr,
                            duration_t estimated_circuit_rtt = duration_t(Settings::ESTIMATED_CIRCUIT_RTT_START)):
+        logger_(logger),
         timer_(ioc),
         buffer_(capacity),
         capacity_(capacity),
@@ -52,25 +56,35 @@ public:
 
     [[nodiscard]] bool insert(seq_t seq, T&& item){
         auto diff = static_cast<std::make_signed_t<seq_t>>(seq - head_);
-        if(diff < 0 || static_cast<size_t>(diff) >= capacity_)
+        if(diff < 0 || static_cast<size_t>(diff) >= capacity_){
+            log_error("Couldn't insert: diff: {}, capacity: {}", diff, capacity_);
             return false;
+        }
 
         size_t index = seq % capacity_;
-        if(buffer_[index].has_value())
+        if(buffer_[index].has_value()){
+            log_error("Couldn't insert: buffer_[index].has_value(): {}",
+                      buffer_[index].has_value() ? "true" : "false");
             return false;
+        }
 
         update_rtt_estimator();
 
         buffer_[index] = std::move(item);
+
+        log_debug("Inserted into buffer successfully.");
         return true;
     }
 
 
     template<typename Callback>
     [[nodiscard]] bool insert_try_drain(seq_t seq, T&& item, Callback&& handler){
-        if(!insert(seq, std::move(item)))
+        if(!insert(seq, std::move(item))){
+            log_error("insert failed.");
             return false;
+        }
         try_drain(std::forward<Callback>(handler));
+        log_debug("try_drain called successfully.");
         return true;
     }
 
@@ -140,6 +154,8 @@ private:
     double rtt_var_us_;
 
     bool timer_active_;
+
+    quill::Logger* logger_{nullptr};
 
 
     void recalculate_rto_bounds(){
@@ -218,5 +234,32 @@ private:
             }
         }
         return 0;
+    }
+
+
+    template<typename... Args>
+    void log_error(fmt::format_string<Args...> fmt_str, Args&&... args){
+        if(logger_){
+            LOG_ERROR(logger_, "[ReorderBuffer] {}",
+                      fmt::format(fmt_str, std::forward<Args>(args)...));
+        }
+    }
+
+
+    template<typename... Args>
+    void log_info(fmt::format_string<Args...> fmt_str, Args&&... args){
+        if(logger_){
+            LOG_INFO(logger_, "[ReorderBuffer] {}",
+                     fmt::format(fmt_str, std::forward<Args>(args)...));
+        }
+    }
+
+
+    template<typename... Args>
+    void log_debug(fmt::format_string<Args...> fmt_str, Args&&... args){
+        if(logger_){
+            LOG_DEBUG(logger_, "[ReorderBuffer] {}",
+                     fmt::format(fmt_str, std::forward<Args>(args)...));
+        }
     }
 };

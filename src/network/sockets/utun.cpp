@@ -909,6 +909,7 @@ bool is_local_or_loopback(const asio::ip::address& addr){
                                        const asio::ip::address& dest,
                                        const asio::ip::address& netmaskv4_prefixv6,
                                        const asio::ip::address& this_public_ip){
+    // todo: uncomment this
     // if(add){
     //     if(is_local_or_loopback(dest) || (!this_public_ip.is_unspecified() && dest == this_public_ip)){
     //         LOG_INFO(logger_, "[UTUN] Skipping route [add] for excluded address: {}", dest.to_string());

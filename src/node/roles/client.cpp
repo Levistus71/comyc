@@ -550,7 +550,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         .circuit_id       = assigned_cid,
         .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(0),
         .relays           = {},
-        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 1, 0),
+        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 1, 0, logger_),
         .nt               = nt,
         .activity_counter = std::make_shared<Statistics<10>>()
     });
@@ -624,7 +624,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(exit_start_seq),
         .relays           = selected_relays,
         .sh_ce            = sh_ce,
-        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 2048, exit_start_seq),
+        .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 2048, exit_start_seq, logger_),
         .nt               = nt,
         .activity_counter = std::make_shared<Statistics<10>>()
     });
