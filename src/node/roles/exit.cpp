@@ -12,7 +12,8 @@ Exit::Exit(asio::io_context& ioc,
     udp_socketv6_(std::move(udp_socketv6)),
     running_(false),
     raw_packet_pool_(16384, "exit_logger"),
-    utun_stream_(ioc_),
+    utun_strand_(asio::make_strand(ioc)),
+    utun_stream_(utun_strand_),
     utun_("exit_logger"){
     logger_ = quill::Frontend::get_logger("exit_logger");
 }
@@ -432,7 +433,7 @@ circuit_id is at the start
     if(circuit_info){
         LOG_DEBUG(logger_, "EXIT: DECRYPTING, cid: {}", packet->cid);
         LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            circuit_info->sh_ce[0], circuit_info->sh_ce[1], circuit_info->sh_ce[2], circuit_info->sh_ce[3], circuit_info->sh_ce[4], circuit_info->sh_ce[5], circuit_info->sh_ce[6], circuit_info->sh_ce[7]);
+                  circuit_info->sh_ce[0], circuit_info->sh_ce[1], circuit_info->sh_ce[2], circuit_info->sh_ce[3], circuit_info->sh_ce[4], circuit_info->sh_ce[5], circuit_info->sh_ce[6], circuit_info->sh_ce[7]);
         size_t inner_len = packet->bytes_received - (sizeof(RoutingFlag) + TRANSIT_HDR_SZ);
         crypto::decrypt_layer_ce(circuit_info->sh_ce, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, inner_len);
     }
@@ -492,51 +493,50 @@ void Exit::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet){
         return;
     }
 
-    std::unique_lock<std::mutex> lock(utun_write_mtx_);
-    utun_write_queue_.push_back(std::move(packet));
-    if(!utun_writing_){
-        utun_writing_ = true;
-        do_write_utun(std::move(lock), seq_id);
-    }
+    asio::post(utun_strand_, [me = shared_from_this(), seq_id, pkt = std::move(packet)]() mutable{
+        me->utun_write_queue_.push_back(std::move(pkt));
+        if(!me->utun_writing_){
+            me->utun_writing_ = true;
+            me->do_write_utun(seq_id);
+        }
+    });
 }
 
 
-void Exit::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id){
+void Exit::do_write_utun(sequence_id_t seq_id){
     if(utun_write_queue_.empty()){
         utun_writing_ = false;
         return;
     }
 
+    // pkt stays alive, by reference:
     auto& pkt = utun_write_queue_.front();
 
-    // scatter gather buffer. for macOS, we need to include ip version (4 bytes)
+    const auto p = pkt->payload;
+    LOG_DEBUG(logger_, "utun write len={} first 8 bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+              pkt->payload_bytes, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+
 #if defined(__APPLE__)
+    // keep alive the protocol. since this is stranded, we can use a private member.
+    current_utun_proto_ = htonl(pkt->ip_version_macos == 6 ? AF_INET6 : AF_INET);
+
     std::array<asio::const_buffer, 2> bufs = {
-        asio::buffer(&pkt->ip_version_macos, FAMILY_HDR_UTUN_SZ),
-        asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
-    };
-#elif defined(__linux__)
-    std::array<asio::const_buffer, 1> bufs = {
+        asio::buffer(&current_utun_proto_, sizeof(current_utun_proto_)),
         asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
     };
 #else
-    // not compatible
+    auto bufs = asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes);
 #endif
 
-    lock.unlock();
-
-    asio::async_write(
-        utun_stream_,
-        bufs,
-        [me = shared_from_this(), seq_id](const boost::system::error_code& ec, size_t /*bytes_transferred*/){
-            if(ec){
-                LOG_ERROR(me->logger_, "Failed to write to utun: {}, seq_id: {}", ec.message(), seq_id);
-            }
-            std::unique_lock<std::mutex> lk(me->utun_write_mtx_);
-            if(!me->utun_write_queue_.empty()){
-                me->utun_write_queue_.pop_front();
-            }
-            me->do_write_utun(std::move(lk), seq_id + 1);
+    auto lmb = [me = shared_from_this(), seq_id](const boost::system::error_code& ec, std::size_t /*bytes_transferred*/){
+        if(ec){
+            LOG_ERROR(me->logger_, "utun write error (seq {}): {}", seq_id, ec.message());
         }
-    );
+        LOG_DEBUG(me->logger_, "wrote to utun.");
+
+        // stranded
+        me->utun_write_queue_.pop_front();
+        me->do_write_utun(seq_id);
+    };
+    utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_,lmb));
 }

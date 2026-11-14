@@ -5,3 +5,5 @@
     use that to encrypt handshake too.
 
 -> relays connection all at once in background (IMPORTANT)
+
+-> lockless reorder buffer

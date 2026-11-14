@@ -92,6 +92,7 @@ private:
 
     ArenaAllocator<utun::RawPacket> raw_packet_pool_;
 
+    asio::strand<asio::io_context::executor_type> utun_strand_;
     asio::posix::stream_descriptor utun_stream_;
     std::atomic<int> utun_sockfd_;
     Utun utun_;
@@ -106,10 +107,10 @@ private:
     RCU_UMap<circuit_id_t, std::shared_ptr<CircuitInfo>> cid_ci_umap_;
 
     // utun
-    std::mutex utun_write_mtx_;
     std::deque<ArenaSlot<IncomingCell>> utun_write_queue_;
     bool utun_writing_{false};
     std::atomic<size_t> relay_rr_counter_{0};
+    uint32_t current_utun_proto_ = 0;
 
 
     void start_listening_utun();
@@ -149,5 +150,5 @@ private:
     void write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet);
 
 
-    void do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id);
+    void do_write_utun(sequence_id_t seq_id);
 };
