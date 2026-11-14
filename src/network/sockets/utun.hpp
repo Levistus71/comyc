@@ -92,7 +92,8 @@ public:
 
     [[nodiscard]] bool add_del_route(bool add,
                                      const asio::ip::address& dest,
-                                     const asio::ip::address& netmaskv4_prefixv6);
+                                     const asio::ip::address& netmaskv4_prefixv6,
+                                     const asio::ip::address& this_public_ip = asio::ip::make_address("192.168.0.101"));
 
 private:
     int utun_fd_ = -1;
@@ -116,7 +117,8 @@ private:
     [[nodiscard]] static bool modify_route(bool enable,
                                            const asio::ip::address& dest,
                                            const asio::ip::address& netmaskv4_prefixv6,
-                                           const asio::ip::address& gateway);
+                                           const asio::ip::address& gateway,
+                                           quill::Logger* logger);
 
 
     [[nodiscard]] bool configure_utun();
@@ -142,13 +144,15 @@ private:
     [[nodiscard]] static bool modify_route_v4(bool enable,
                                               const asio::ip::address& dest,
                                               const asio::ip::address& netmaskv4_prefixv6,
-                                              const asio::ip::address& gateway);
+                                              const asio::ip::address& gateway,
+                                              quill::Logger* logger);
 
 
     [[nodiscard]] static bool modify_route_v6(bool enable,
                                               const asio::ip::address& dest,
                                               const asio::ip::address& netmaskv4_prefixv6,
-                                              const asio::ip::address& gateway);
+                                              const asio::ip::address& gateway,
+                                              quill::Logger* logger);
 
 
     static std::optional<asio::ip::address> get_default_gateway_v4();

@@ -39,7 +39,7 @@ while true; do
     case "$yn" in
         [Yy]* )
             tmux split-window -h -t "$SESSION:0" \
-                "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../build/node -r client-relay -b 127.0.0.1 --bootstrap-port 6969 -c --exit-ip 192.168.0.100 --exit-port 8001 -l ./logs/client_logs.txt; read"
+                "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../build/node -r client-relay -b 127.0.0.1 --bootstrap-port 6969 -c --exit-ip 192.168.0.100 --exit-port 8001 -l ./logs/client_logs.txt -j; read"
             unset SUDO_PASS
             tmux attach-session -t "$SESSION"
             break

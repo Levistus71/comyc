@@ -78,7 +78,7 @@ void Utun::stop(){
 
     bool cleared_all = true;
     for(const auto& r: active_routes_){
-        if(!modify_route(false, r.dest, r.mask, r.gateway)){
+        if(!modify_route(false, r.dest, r.mask, r.gateway, logger_)){
             cleared_all = false;
         }
     }
@@ -132,6 +132,14 @@ void Utun::stop(){
     vpn_assigned_ipv4_ = vpn_assigned_v4;
     vpn_assigned_ipv6_ = vpn_assigned_v6;
 
+    // for configuring utun v6, the vpn_assigned_ipv6_ should be in the same /64 prefix
+    {
+        auto gw_bytes = vpn_assigned_ipv6_.to_bytes();
+        std::memset(gw_bytes.data() + 8, 0, 8);
+        gw_bytes[15] = (vpn_assigned_ipv6_.to_bytes()[15] == 1) ? 2 : 1;    // lol
+        dummy_gateway_ipv6_ = asio::ip::address_v6(gw_bytes);
+    }
+
     {
         auto maybe_gateway = get_default_gateway_v4();
         if(maybe_gateway.has_value()){
@@ -169,22 +177,25 @@ void Utun::stop(){
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(route_update_mutex_);
+    std::unique_lock<std::mutex> lock(route_update_mutex_);
 
     if(!configure_utun()){
         LOG_ERROR(logger_, "[UTUN] configure_utun() failed.");
+        lock.unlock();
         stop();
         return false;
     }
 
     if(!start_utun()){
         LOG_ERROR(logger_, "[UTUN] start_utun() failed.");
+        lock.unlock();
         stop();
         return false;
     }
 
     if(hijack_system_traffic && !toggle_hijack_on()){
         LOG_ERROR(logger_, "[UTUN] toggle_hijack_on() failed.");
+        lock.unlock();
         stop();
         return false;
     }
@@ -381,7 +392,7 @@ int Utun::get_fd() const{
 
     ifra.ifra_addr.sin6_family = AF_INET6;
     ifra.ifra_addr.sin6_len = sizeof(sockaddr_in6);
-    ifra.ifra_addr.sin6_scope_id = if_index;
+    ifra.ifra_addr.sin6_scope_id = local_ip.is_link_local() ? if_index : 0;
     inet_pton(AF_INET6, local_ip.to_string().c_str(), &ifra.ifra_addr.sin6_addr);
 
     // NOTE: Omit ifra_dstaddr for macOS utun v6 aliasing to prevent EINVAL
@@ -402,6 +413,14 @@ int Utun::get_fd() const{
 
     ifra.ifra_lifetime.ia6t_vltime = 0xffffffff; // valid_lifetime: max possible lifetime
     ifra.ifra_lifetime.ia6t_pltime = 0xffffffff; // preferred lifetime: max possible lifetime
+
+    LOG_INFO(logger_, "[UTUN] Configuring IPv6 on {} (idx={}): local={}/{}, remote={}, scope_id={}",
+         utun_name_,
+         if_index,
+         local_ip.to_string(),
+         prefix_len,
+         remote_ip.to_string(),
+         ifra.ifra_addr.sin6_scope_id);
 
     // const bool res = (::ioctl(sock, SIOCAIFADDR_IN6, &ifra) >= 0);
     const int x = ::ioctl(sock, SIOCAIFADDR_IN6, &ifra);
@@ -461,13 +480,13 @@ int Utun::get_fd() const{
 
     std::vector<RouteConfig> new_routes;
     for(const auto& t: routes){
-        if(modify_route(true, t.dest, t.mask, t.gateway)){
+        if(modify_route(true, t.dest, t.mask, t.gateway, logger_)){
             new_routes.push_back(t);
         }
         else{
             LOG_ERROR(logger_, "[UTUN] Error while adding routes. Trying rollback.");
             for(auto& [dest, mask, gateway]: new_routes){
-                if(!modify_route(false, dest, mask, gateway)){
+                if(!modify_route(false, dest, mask, gateway, logger_)){
                     LOG_CRITICAL(logger_, "[UTUN] Error while rolling back added routes.");
                     return false;
                 }
@@ -486,20 +505,33 @@ int Utun::get_fd() const{
 [[nodiscard]] bool Utun::modify_route(const bool enable,
                                       const asio::ip::address& dest,
                                       const asio::ip::address& netmaskv4_prefixv6,
-                                      const asio::ip::address& gateway){
+                                      const asio::ip::address& gateway,
+                                      quill::Logger* logger){
     if(dest.is_v4() != gateway.is_v4())
         return false;
 
     if(dest.is_v4()){
-        return modify_route_v4(enable, dest, netmaskv4_prefixv6, gateway);
+        if(!modify_route_v4(enable, dest, netmaskv4_prefixv6, gateway, logger)){
+            LOG_INFO(logger, "modify_route_v4 failed: params: enable: {}, dest: {}, netmask: {}, gateway: {}",
+                     enable ? "true" : "false", dest.to_string(), netmaskv4_prefixv6.to_string(), gateway.to_string());
+            return false;
+        }
+        return true;
     }
     else{
-        return modify_route_v6(enable, dest, netmaskv4_prefixv6, gateway);
+        if(!modify_route_v6(enable, dest, netmaskv4_prefixv6, gateway, logger)){
+            LOG_INFO(logger, "modify_route_v6 failed: params: enable: {}, dest: {}, prefix: {}, gateway: {}",
+                     enable ? "true" : "false", dest.to_string(), netmaskv4_prefixv6.to_string(), gateway.to_string());
+            return false;
+        }
+        return true;
     }
 }
 
 
-[[nodiscard]] bool Utun::modify_route_v4(const bool enable, const asio::ip::address& dest, const asio::ip::address& netmaskv4_prefixv6, const asio::ip::address& gateway){
+[[nodiscard]] bool Utun::modify_route_v4(const bool enable,
+                                         const asio::ip::address& dest, const asio::ip::address& netmaskv4_prefixv6,
+                                         const asio::ip::address& gateway, quill::Logger* logger){
 #if defined(__APPLE__)
     const int sock = ::socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC);
     if(sock < 0)
@@ -539,7 +571,11 @@ int Utun::get_fd() const{
     const auto mask_bytes = netmaskv4_prefixv6.to_v4().to_bytes();
     std::memcpy(&msg.mask.sin_addr, mask_bytes.data(), mask_bytes.size());
 
-    const bool ret = (::write(sock, &msg, sizeof(msg)) > 0);
+    auto err = ::write(sock, &msg, sizeof(msg));
+    if(err < 0){
+        LOG_ERROR(logger, "[UTUN] modify_route_v4 write failed: {} (errno={})", std::strerror(errno), errno);
+    }
+    const bool ret = (err > 0);
     ::close(sock);
     return ret;
 #elif defined(__linux__)
@@ -574,7 +610,9 @@ int Utun::get_fd() const{
 }
 
 
-[[nodiscard]] bool Utun::modify_route_v6(const bool enable, const asio::ip::address& dest, const asio::ip::address& netmaskv4_prefixv6, const asio::ip::address& gateway){
+[[nodiscard]] bool Utun::modify_route_v6(const bool enable,
+                                         const asio::ip::address& dest, const asio::ip::address& netmaskv4_prefixv6,
+                                         const asio::ip::address& gateway, quill::Logger* logger){
 #if defined(__APPLE__)
     const int sock = ::socket(PF_ROUTE, SOCK_RAW, AF_UNSPEC);
     if(sock < 0)
@@ -614,7 +652,11 @@ int Utun::get_fd() const{
     const auto mask_bytes = netmaskv4_prefixv6.to_v6().to_bytes();
     std::memcpy(&msg.mask.sin6_addr, mask_bytes.data(), mask_bytes.size());
 
-    const bool ret = (::write(sock, &msg, sizeof(msg)) > 0);
+    auto err = ::write(sock, &msg, sizeof(msg));
+    if(err < 0){
+        LOG_ERROR(logger, "[UTUN] modify_route_v6 write failed: {} (errno={})", std::strerror(errno), errno);
+    }
+    const bool ret = (err > 0);
     ::close(sock);
     return ret;
 #elif defined(__linux__)
@@ -828,9 +870,57 @@ std::optional<asio::ip::address_v6> Utun::get_default_gateway_v6(){
 }
 
 
+namespace{
+bool is_local_or_loopback(const asio::ip::address& addr){
+    if(addr.is_loopback() || addr.is_multicast() || addr.is_unspecified()){
+        return true;
+    }
+
+    if(addr.is_v4()){
+        const auto bytes = addr.to_v4().to_bytes();
+        // 10.0.0.0/8 (Private)
+        if(bytes[0] == 10)
+            return true;
+        // 172.16.0.0/12 (Private)
+        if(bytes[0] == 172 && (bytes[1] >= 16 && bytes[1] <= 31))
+            return true;
+        // 192.168.0.0/16 (Private)
+        if(bytes[0] == 192 && bytes[1] == 168)
+            return true;
+        // 100.64.0.0/10 (Carrier-Grade NAT)
+        if(bytes[0] == 100 && (bytes[1] >= 64 && bytes[1] <= 127))
+            return true;
+    }
+    else if(addr.is_v6()){
+        if(addr.to_v6().is_link_local())
+            return true;
+        const auto bytes = addr.to_v6().to_bytes();
+        // fc00::/7 (Unique Local Address - ULA)
+        if((bytes[0] & 0xfe) == 0xfc)
+            return true;
+    }
+
+    return false;
+}
+}
+
+
 [[nodiscard]] bool Utun::add_del_route(const bool add,
                                        const asio::ip::address& dest,
-                                       const asio::ip::address& netmaskv4_prefixv6){
+                                       const asio::ip::address& netmaskv4_prefixv6,
+                                       const asio::ip::address& this_public_ip){
+    // if(add){
+    //     if(is_local_or_loopback(dest) || (!this_public_ip.is_unspecified() && dest == this_public_ip)){
+    //         LOG_INFO(logger_, "[UTUN] Skipping route [add] for excluded address: {}", dest.to_string());
+    //         return false;
+    //     }
+    // }
+
+    if(dest == this_public_ip){
+        LOG_INFO(logger_, "[UTUN] Skipping route [add] for excluded address: {}", dest.to_string());
+        return false;
+    }
+
     const auto gateway = dest.is_v4() ? default_gateway_ipv4_ : default_gateway_ipv6_;
 
     std::lock_guard<std::mutex> lock(route_update_mutex_);
@@ -848,8 +938,8 @@ std::optional<asio::ip::address_v6> Utun::get_default_gateway_v6(){
             return true;
 
         bool updated = ip_v4
-                           ? modify_route_v4(add, dest, netmaskv4_prefixv6, gateway)
-                           : modify_route_v6(add, dest, netmaskv4_prefixv6, gateway);
+                           ? modify_route_v4(add, dest, netmaskv4_prefixv6, gateway, logger_)
+                           : modify_route_v6(add, dest, netmaskv4_prefixv6, gateway, logger_);
 
         if(updated){
             active_routes_.insert(route);
@@ -859,15 +949,21 @@ std::optional<asio::ip::address_v6> Utun::get_default_gateway_v6(){
                      gateway.to_string());
             return true;
         }
-        return false;
+        else{
+            LOG_INFO(logger_, "[UTUN] Failed to update route [add]: {}/{}, gateway: {}",
+                     dest.to_string(),
+                     netmaskv4_prefixv6.to_string(),
+                     gateway.to_string());
+            return false;
+        }
     }
     else{
         if(!active_routes_.contains(route))
             return true;
 
         bool updated = ip_v4
-                           ? modify_route_v4(add, dest, netmaskv4_prefixv6, gateway)
-                           : modify_route_v6(add, dest, netmaskv4_prefixv6, gateway);
+                           ? modify_route_v4(add, dest, netmaskv4_prefixv6, gateway, logger_)
+                           : modify_route_v6(add, dest, netmaskv4_prefixv6, gateway, logger_);
 
         if(updated){
             active_routes_.erase(route);
@@ -877,6 +973,12 @@ std::optional<asio::ip::address_v6> Utun::get_default_gateway_v6(){
                      gateway.to_string());
             return true;
         }
-        return false;
+        else{
+            LOG_INFO(logger_, "[UTUN] Failed to update route [delete]: {}/{}, gateway: {}",
+                     dest.to_string(),
+                     netmaskv4_prefixv6.to_string(),
+                     gateway.to_string());
+            return false;
+        }
     }
 }
