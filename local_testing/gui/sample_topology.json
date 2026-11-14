@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {"id": "client-1", "role": "client", "ip": "10.0.0.101", "port": 5001, "label": "client-1 (10.0.0.101:5001)"},
+    {"id": "client-2", "role": "client", "ip": "10.0.0.102", "port": 5002, "label": "client-2 (10.0.0.102:5002)"},
+    {"id": "relay-1", "role": "relay", "ip": "10.0.0.11", "port": 6969, "label": "relay-1 (10.0.0.11:6969)"},
+    {"id": "relay-2", "role": "relay", "ip": "10.0.0.12", "port": 6969, "label": "relay-2 (10.0.0.12:6969)"},
+    {"id": "relay-3", "role": "relay", "ip": "10.0.0.13", "port": 6969, "label": "relay-3 (10.0.0.13:6969)"},
+    {"id": "exit-1", "role": "exit", "ip": "10.0.0.51", "port": 6969, "label": "exit-1 (10.0.0.51:6969)"},
+    {"id": "exit-2", "role": "exit", "ip": "10.0.0.52", "port": 6969, "label": "exit-2 (10.0.0.52:6969)"}
+  ],
+  "circuits": [
+    {"cid": 1001, "client": "client-1", "relay": "10.0.0.11:6969", "exit": "10.0.0.51:6969", "dest": "142.250.190.46:443 (YouTube)"},
+    {"cid": 1002, "client": "client-1", "relay": "10.0.0.12:6969", "exit": "10.0.0.52:6969", "dest": "default (vpn)"},
+    {"cid": 1003, "client": "client-2", "relay": "10.0.0.13:6969", "exit": "10.0.0.51:6969", "dest": "1.1.1.1:53 (Cloudflare DNS)"}
+  ],
+  "timestamp": 1700000000
+}

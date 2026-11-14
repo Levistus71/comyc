@@ -1,6 +1,7 @@
 #include "src/node/node.hpp"
 #include "src/network/comms/control.hpp"
 #include "src/encryption/encryption.hpp"
+#include "src/gui/telemetry/demo_reporter.hpp"
 
 #include <stack>
 #include <algorithm>
@@ -149,6 +150,11 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
         }
     }
 
+    if(options->demo_mode){
+        telemetry::DemoReporter::instance().init(ioc_, options);
+        LOG_INFO(logger_, "Demo reporter initialized towards {}:{}", options->demo_host_ip, options->demo_host_port);
+    }
+
     co_return true;
 }
 
@@ -158,6 +164,8 @@ void Node::stop(){
         LOG_ERROR(logger_, "stop() called when not running_.");
         return;
     }
+
+    telemetry::DemoReporter::instance().stop();
 
     if(client_ != nullptr)
         client_->stop();

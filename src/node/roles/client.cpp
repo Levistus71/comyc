@@ -3,6 +3,7 @@
 #include "src/network/sockets/utun.hpp"
 #include "src/network/comms/control.hpp"
 #include "src/node/node.hpp"
+#include "src/gui/telemetry/demo_reporter.hpp"
 #include "src/encryption/encryption.hpp"
 
 
@@ -646,6 +647,13 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     for(const auto& rinfo: selected_relays){
         sid_ci_umap_.put(rinfo->session_id, final_ci);
         LOG_INFO(logger_, "Put sid: {} into sid_ci_umap_ for ci: {}", rinfo->session_id, assigned_cid);
+    }
+
+    if(telemetry::DemoReporter::instance().is_enabled()){
+        std::string relay_str = selected_relays.empty() ? "" : (selected_relays[0]->endpoint.address().to_string() + ":" + std::to_string(selected_relays[0]->endpoint.port()));
+        std::string exit_str = exit_ep.address().to_string() + ":" + std::to_string(exit_ep.port());
+        std::string dest_str = nt.has_value() ? nt->to_string() : "default";
+        telemetry::DemoReporter::instance().record_circuit(assigned_cid, relay_str, exit_str, dest_str);
     }
 
     // update nt_ci_umap_. new packets should use the new ci from now

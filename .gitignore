@@ -4,3 +4,7 @@ build
 local_testing/logs/
 *.sync-conflict-*
 .stfolder
+node_modules/
+jspm_packages/
+.pnpm-store/
+src/gui/dist/

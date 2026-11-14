@@ -30,6 +30,10 @@ struct CliOptions{
     bool show_version = false;
     bool hijack_utun = true;
     bool bootstrap_node = false;
+
+    bool demo_mode = false;
+    std::string demo_host_ip = "127.0.0.1";
+    uint16_t demo_host_port = 6969;
 };
 
 
@@ -256,6 +260,43 @@ public:
                 if(!val)
                     return std::nullopt;
                 opts.log_file = std::string(*val);
+            }
+            else if(key == "--demo"){
+                opts.demo_mode = true;
+            }
+            else if(key == "--demo-host"){
+                opts.demo_mode = true;
+                auto val = get_value(key);
+                if(!val)
+                    return std::nullopt;
+                std::string s(*val);
+                auto colon = s.find(':');
+                if(colon != std::string::npos){
+                    opts.demo_host_ip = s.substr(0, colon);
+                    try{
+                        opts.demo_host_port = static_cast<uint16_t>(std::stoi(s.substr(colon + 1)));
+                    }
+                    catch(...){
+                        std::cerr << "Error: Invalid port in --demo-host '" << s << "'\n";
+                        return std::nullopt;
+                    }
+                }
+                else{
+                    opts.demo_host_ip = s;
+                }
+            }
+            else if(key == "--demo-port"){
+                opts.demo_mode = true;
+                auto val = get_value(key);
+                if(!val)
+                    return std::nullopt;
+                try{
+                    opts.demo_host_port = static_cast<uint16_t>(std::stoi(std::string(*val)));
+                }
+                catch(...){
+                    std::cerr << "Error: Invalid demo port '" << *val << "'\n";
+                    return std::nullopt;
+                }
             }
             else{
                 std::cerr << "Error: Unrecognized option '" << arg << "'\n\n";
