@@ -74,6 +74,8 @@ Utun::~Utun(){
 
 
 void Utun::stop(){
+    disable_exit_nat();
+
     std::lock_guard<std::mutex> lock(route_update_mutex_);
 
     bool cleared_all = true;
@@ -128,7 +130,8 @@ void Utun::stop(){
 
 [[nodiscard]] bool Utun::start(const bool hijack_system_traffic,
                                const asio::ip::address_v4& vpn_assigned_v4,
-                               const asio::ip::address_v6& vpn_assigned_v6){
+                               const asio::ip::address_v6& vpn_assigned_v6,
+                               bool masquerade){
     vpn_assigned_ipv4_ = vpn_assigned_v4;
     vpn_assigned_ipv6_ = vpn_assigned_v6;
 
@@ -136,7 +139,7 @@ void Utun::stop(){
     {
         auto gw_bytes = vpn_assigned_ipv6_.to_bytes();
         std::memset(gw_bytes.data() + 8, 0, 8);
-        gw_bytes[15] = (vpn_assigned_ipv6_.to_bytes()[15] == 1) ? 2 : 1;    // lol
+        gw_bytes[15] = (vpn_assigned_ipv6_.to_bytes()[15] == 1) ? 2 : 1; // lol
         dummy_gateway_ipv6_ = asio::ip::address_v6(gw_bytes);
     }
 
@@ -198,6 +201,31 @@ void Utun::stop(){
         lock.unlock();
         stop();
         return false;
+    }
+
+    if(masquerade){
+        RouteConfig client_subnet_route{
+            .dest    = asio::ip::make_address("10.0.0.0"),
+            .mask    = asio::ip::make_address("255.0.0.0"),
+            .gateway = dummy_gateway_ipv4_
+        };
+
+        if(!modify_route(true, client_subnet_route.dest, client_subnet_route.mask, client_subnet_route.gateway, logger_)){
+            LOG_ERROR(logger_, "[UTUN] Failed to add 10.0.0.0/8 route into utun.");
+            lock.unlock();
+            stop();
+            return false;
+        }
+        active_routes_.insert(client_subnet_route);
+        LOG_INFO(logger_, "[UTUN] Added 10.0.0.0/8 route via {}", dummy_gateway_ipv4_.to_string());
+
+        if(!enable_exit_nat()){
+            LOG_ERROR(logger_, "[UTUN] enable_exit_nat() failed.");
+            lock.unlock();
+            stop();
+            return false;
+        }
+        LOG_INFO(logger_, "[UTUN] utun exit NAT setup complete.");
     }
 
     return true;
@@ -415,12 +443,12 @@ int Utun::get_fd() const{
     ifra.ifra_lifetime.ia6t_pltime = 0xffffffff; // preferred lifetime: max possible lifetime
 
     LOG_INFO(logger_, "[UTUN] Configuring IPv6 on {} (idx={}): local={}/{}, remote={}, scope_id={}",
-         utun_name_,
-         if_index,
-         local_ip.to_string(),
-         prefix_len,
-         remote_ip.to_string(),
-         ifra.ifra_addr.sin6_scope_id);
+             utun_name_,
+             if_index,
+             local_ip.to_string(),
+             prefix_len,
+             remote_ip.to_string(),
+             ifra.ifra_addr.sin6_scope_id);
 
     // const bool res = (::ioctl(sock, SIOCAIFADDR_IN6, &ifra) >= 0);
     const int x = ::ioctl(sock, SIOCAIFADDR_IN6, &ifra);
@@ -982,4 +1010,113 @@ bool is_local_or_loopback(const asio::ip::address& addr){
             return false;
         }
     }
+}
+
+
+// doesn't act as nat, just forwards packets with the same ip it came with
+bool Utun::enable_ip_forwarding() const{
+    int enable = 1;
+    if(sysctlbyname("net.inet.ip.forwarding", nullptr, nullptr, &enable, sizeof(enable)) != 0){
+        LOG_ERROR(logger_, "sysctlbyname(net.inet.ip.forwarding) failed: {}", std::strerror(errno));
+        return false;
+    }
+    LOG_INFO(logger_, "ipv4 forwarding enabled.");
+
+    if(sysctlbyname("net.inet6.ip6.forwarding", nullptr, nullptr, &enable, sizeof(enable)) != 0){
+        LOG_ERROR(logger_, "sysctlbyname(net.inet6.ip6.forwarding) failed: {}", std::strerror(errno));
+        return false;
+    }
+    LOG_INFO(logger_, "ipv6 forwarding enabled.");
+
+    return true;
+}
+
+
+// actual nat
+bool Utun::enable_exit_nat(const std::string& external_interface) const{
+    if(!enable_ip_forwarding()){
+        return false;
+    }
+
+    std::system("pfctl -e >/dev/null 2>&1");
+
+    const std::string anchor(nat_service_name);
+
+    // 1. Load the actual NAT and filter rules into the sub-anchor
+    const std::string anchor_cmd = "pfctl -a " + anchor + " -f -";
+    FILE* pipe = popen(anchor_cmd.c_str(), "w");
+    if(!pipe){
+        LOG_ERROR(logger_, "Failed to open pipe to pfctl: {}", std::strerror(errno));
+        return false;
+    }
+
+    // Scope NAT to RFC1918 private ranges + CGNAT (100.64.0.0/10) so clients can use any private IP
+    // Keep state so return traffic is automatically translated and routed back into utun
+    const std::string anchor_rules =
+        "table <vpn_private> const { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 }\n"
+        "nat on " + external_interface + " inet from <vpn_private> to any -> (" + external_interface + ")\n"
+        "pass quick on " + utun_name_ + " all keep state\n"
+        "pass out quick on " + external_interface + " inet from <vpn_private> to any keep state\n";
+
+    if(fwrite(anchor_rules.data(), 1, anchor_rules.size(), pipe) != anchor_rules.size()){
+        LOG_ERROR(logger_, "Failed to write rules to pfctl pipe");
+        pclose(pipe);
+        return false;
+    }
+
+    int rc = pclose(pipe);
+    if(rc != 0){
+        LOG_ERROR(logger_, "pfctl failed to load anchor '{}' (exit code: {})", anchor, rc);
+        return false;
+    }
+
+    // 2. Hook our anchor into the main ruleset alongside /etc/pf.conf so macOS actually evaluates it
+    const std::string main_cmd = "pfctl -f -";
+    FILE* main_pipe = popen(main_cmd.c_str(), "w");
+    if(!main_pipe){
+        LOG_ERROR(logger_, "Failed to open pipe to pfctl for main ruleset: {}", std::strerror(errno));
+        return false;
+    }
+
+    const std::string main_rules =
+        "scrub-anchor \"com.apple/*\"\n"
+        "nat-anchor \"com.apple/*\"\n"
+        "nat-anchor \"" + anchor + "\"\n"
+        "rdr-anchor \"com.apple/*\"\n"
+        "dummynet-anchor \"com.apple/*\"\n"
+        "anchor \"com.apple/*\"\n"
+        "anchor \"" + anchor + "\"\n"
+        "load anchor \"com.apple\" from \"/etc/pf.anchors/com.apple\"\n";
+
+    if(fwrite(main_rules.data(), 1, main_rules.size(), main_pipe) != main_rules.size()){
+        LOG_ERROR(logger_, "Failed to write main ruleset to pfctl pipe");
+        pclose(main_pipe);
+        return false;
+    }
+
+    rc = pclose(main_pipe);
+    if(rc != 0){
+        LOG_ERROR(logger_, "pfctl failed to hook anchor '{}' into main ruleset (exit code: {})", anchor, rc);
+        return false;
+    }
+
+    LOG_INFO(logger_, "Exit NAT enabled on {} for {} (anchor: {})", external_interface, utun_name_, anchor);
+    return true;
+}
+
+
+bool Utun::disable_exit_nat(){
+    const std::string anchor(nat_service_name);
+    const std::string command = "pfctl -a " + anchor + " -F all >/dev/null 2>&1";
+    int rc = std::system(command.c_str());
+    if(rc != 0){
+        LOG_WARNING(logger_, "pfctl failed to flush anchor '{}' (exit code: {})", anchor, rc);
+        return false;
+    }
+
+    // Reload default /etc/pf.conf to remove the custom anchor hooks
+    std::system("pfctl -f /etc/pf.conf >/dev/null 2>&1");
+
+    LOG_INFO(logger_, "Exit NAT disabled (flushed anchor: {})", anchor);
+    return true;
 }

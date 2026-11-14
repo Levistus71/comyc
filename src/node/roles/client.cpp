@@ -64,11 +64,14 @@ Client::Client(asio::io_context& ioc,
     known_relays_(std::move(known_relays)),
     default_ci_(nullptr),
     raw_packet_pool_(Settings::ARENA_SLOTS, "client_logger"),
-    utun_stream_(ioc_),
+    utun_strand_(asio::make_strand(ioc_)),
+    utun_stream_(utun_strand_),
     utun_("client_logger"){
     logger_ = quill::Frontend::get_logger("client_logger");
     default_vpn_v4_ = RandomGen::gen_address_v4();
-    default_vpn_v6_ = RandomGen::gen_address_v6();
+    do{
+        default_vpn_v6_ = RandomGen::gen_address_v6();
+    } while(default_vpn_v6_.to_bytes()[0] == 0xFF);
     exits_ = {std::move(exit_endpoint)};
 }
 
@@ -129,7 +132,7 @@ void Client::update_relays(){
         co_return false;
     }
 
-    if(!utun_.start(hijack_system_traffic, default_vpn_v4_, default_vpn_v6_)){
+    if(!utun_.start(hijack_system_traffic, default_vpn_v4_, default_vpn_v6_, false)){
         LOG_ERROR(logger_, "Failed to start utun.");
         co_return false;
     }
@@ -753,7 +756,8 @@ incoming packet:
 
     if(packet->payload_bytes > 0){
         const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
-        packet->ip_version_macos = (ip_ver == 6) ? AF_INET6 : AF_INET;
+        packet->ip_version_macos = htonl((ip_ver == 6) ? AF_INET6 : AF_INET);   // those who know :skull:,
+        // fucking htonl
     }
     else{
         packet->ip_version_macos = AF_INET;
@@ -811,16 +815,17 @@ void Client::write_to_utun(sequence_id_t seq_id, ArenaSlot<IncomingCell> packet)
         return;
     }
 
-    std::unique_lock<std::mutex> lock(utun_write_mtx_);
-    utun_write_queue_.push_back(std::move(packet));
-    if(!utun_writing_){
-        utun_writing_ = true;
-        do_write_utun(std::move(lock), seq_id);
-    }
+    asio::post(utun_strand_, [me = shared_from_this(), seq_id, pkt = std::move(packet)]() mutable{
+        me->utun_write_queue_.push_back(std::move(pkt));
+        if(!me->utun_writing_){
+            me->utun_writing_ = true;
+            me->do_write_utun(seq_id);
+        }
+    });
 }
 
 
-void Client::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_id){
+void Client::do_write_utun(sequence_id_t seq_id){
     if(utun_write_queue_.empty()){
         utun_writing_ = false;
         return;
@@ -842,22 +847,17 @@ void Client::do_write_utun(std::unique_lock<std::mutex> lock, sequence_id_t seq_
     // not compatible
 #endif
 
-    lock.unlock();
-
-    asio::async_write(
-        utun_stream_,
-        bufs,
-        [me = shared_from_this(), seq_id](const boost::system::error_code& ec, size_t /*bytes_transferred*/){
-            if(ec){
-                LOG_ERROR(me->logger_, "Failed to write to utun: {}, seq_id: {}", ec.message(), seq_id);
-            }
-            std::unique_lock<std::mutex> lk(me->utun_write_mtx_);
-            if(!me->utun_write_queue_.empty()){
-                me->utun_write_queue_.pop_front();
-            }
-            me->do_write_utun(std::move(lk), seq_id + 1);
+    auto lmb = [me = shared_from_this(), seq_id](const boost::system::error_code& ec, std::size_t /*bytes_transferred*/){
+        if(ec){
+            LOG_ERROR(me->logger_, "utun write error (seq {}): {}", seq_id, ec.message());
         }
-    );
+        LOG_DEBUG(me->logger_, "wrote to utun.");
+
+        // stranded
+        me->utun_write_queue_.pop_front();
+        me->do_write_utun(seq_id);
+    };
+    utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_,lmb));
 }
 
 

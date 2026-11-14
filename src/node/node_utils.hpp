@@ -586,9 +586,18 @@ public:
 
 
     static asio::ip::address_v4 gen_address_v4(){
-        std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
-        const uint32_t random_ip_int = dist(gen_);
-        return asio::ip::address_v4(random_ip_int);
+        std::uniform_int_distribution<unsigned int> oct2(1, 254);
+        std::uniform_int_distribution<unsigned int> oct3(0, 255);
+        std::uniform_int_distribution<unsigned int> oct4(1, 254);
+
+        asio::ip::address_v4::bytes_type bytes{
+            10,
+            static_cast<unsigned char>(oct2(gen_)),
+            static_cast<unsigned char>(oct3(gen_)),
+            static_cast<unsigned char>(oct4(gen_))
+        };
+
+        return asio::ip::address_v4(bytes);
     }
 
 

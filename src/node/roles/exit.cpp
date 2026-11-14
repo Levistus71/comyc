@@ -32,7 +32,7 @@ Exit::~Exit(){
         return false;
     }
 
-    if(!utun_.start(false, RandomGen::gen_address_v4(), RandomGen::gen_address_v6())){
+    if(!utun_.start(false, RandomGen::gen_address_v4(), RandomGen::gen_address_v6(), true)){
         LOG_ERROR(logger_, "[UTUN] Failed to start utun.");
         return false;
     }
@@ -456,7 +456,8 @@ circuit_id is at the start
 
     if(packet->payload_bytes > 0){
         const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
-        packet->ip_version_macos = (ip_ver == 6) ? AF_INET6 : AF_INET;
+        packet->ip_version_macos = htonl((ip_ver == 6) ? AF_INET6 : AF_INET);   // those who know :skull:, FUCK ME MAN
+        // htonl fucking took me 2 hours to fix, was looking at utuns.
     }
     else{
         packet->ip_version_macos = AF_INET;
@@ -517,11 +518,8 @@ void Exit::do_write_utun(sequence_id_t seq_id){
               pkt->payload_bytes, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
 
 #if defined(__APPLE__)
-    // keep alive the protocol. since this is stranded, we can use a private member.
-    current_utun_proto_ = htonl(pkt->ip_version_macos == 6 ? AF_INET6 : AF_INET);
-
     std::array<asio::const_buffer, 2> bufs = {
-        asio::buffer(&current_utun_proto_, sizeof(current_utun_proto_)),
+        asio::buffer(&pkt->ip_version_macos, sizeof(pkt->ip_version_macos)),
         asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes)
     };
 #else

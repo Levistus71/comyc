@@ -75,7 +75,8 @@ public:
 
     [[nodiscard]] bool start(bool hijack_system_traffic,
                              const asio::ip::address_v4& vpn_assigned_v4,
-                             const asio::ip::address_v6& vpn_assigned_v6);
+                             const asio::ip::address_v6& vpn_assigned_v6,
+                             bool masquerade);
 
 
     void stop();
@@ -94,7 +95,9 @@ public:
                                      const asio::ip::address& dest,
                                      const asio::ip::address& netmaskv4_prefixv6,
                                      const asio::ip::address& this_public_ip = asio::ip::make_address("192.168.0.101"));
-                                    // todo: remove 192.168.0.101 here ^
+
+
+    // todo: remove 192.168.0.101 here ^
 
 private:
     int utun_fd_ = -1;
@@ -113,6 +116,8 @@ private:
 
     std::mutex route_update_mutex_;                 // locks are fine, route updates happen occasionally (not frequent).
     std::unordered_set<RouteConfig> active_routes_; // accessed only in start(), stop(), ~Utun() and modify_route(). all use lock.
+
+    static constexpr std::string_view nat_service_name = "com.apple/comyc_exit";
 
 
     [[nodiscard]] static bool modify_route(bool enable,
@@ -160,4 +165,13 @@ private:
 
 
     static std::optional<asio::ip::address_v6> get_default_gateway_v6();
+
+
+    bool enable_ip_forwarding() const;
+
+
+    bool enable_exit_nat(const std::string& en0 = "en0") const;
+
+
+    bool disable_exit_nat();
 };

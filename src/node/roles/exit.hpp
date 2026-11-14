@@ -110,7 +110,6 @@ private:
     std::deque<ArenaSlot<IncomingCell>> utun_write_queue_;
     bool utun_writing_{false};
     std::atomic<size_t> relay_rr_counter_{0};
-    uint32_t current_utun_proto_ = 0;
 
 
     void start_listening_utun();
