@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
-#include <cstdint>
+#include <cstring>
+#include <initializer_list>
 #include <openssl/evp.h>
+#include <openssl/sha.h>
 #include <openssl/rand.h>
 #include <openssl/crypto.h>
 
@@ -22,6 +24,12 @@ using IV128 = std::array<uint8_t, IV_SIZE>;
 struct X25519KeyPair{
     PubKey256 public_key{};
     PrivKey256 private_key{};
+};
+
+
+struct BufferSlice{
+    uint8_t* data;
+    size_t len;
 };
 
 
@@ -49,7 +57,7 @@ inline bool generate_x25519_keypair(X25519KeyPair& keypair){
 }
 
 
-// derive a 32-byte shared secret from our private key and peer's public key using X25519 ECDH
+// derive a 32-byte symmetric key from X25519 ECDH + SHA-256
 inline bool derive_x25519_shared_secret(const PrivKey256& our_private_key,
                                         const PubKey256& peer_public_key,
                                         Key256& shared_secret){
@@ -68,17 +76,20 @@ inline bool derive_x25519_shared_secret(const PrivKey256& our_private_key,
         return false;
     }
 
+    Key256 raw_secret{};
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(priv_pkey, nullptr);
     bool success = false;
     if(ctx && EVP_PKEY_derive_init(ctx) > 0 &&
        EVP_PKEY_derive_set_peer(ctx, peer_pkey) > 0){
-        size_t secret_len = shared_secret.size();
-        if(EVP_PKEY_derive(ctx, shared_secret.data(), &secret_len) > 0 &&
-           secret_len == shared_secret.size()){
+        size_t secret_len = raw_secret.size();
+        if(EVP_PKEY_derive(ctx, raw_secret.data(), &secret_len) > 0 &&
+           secret_len == raw_secret.size()){
+            SHA256(raw_secret.data(), raw_secret.size(), shared_secret.data());
             success = true;
         }
     }
 
+    OPENSSL_cleanse(raw_secret.data(), raw_secret.size());
     if(ctx){
         EVP_PKEY_CTX_free(ctx);
     }
@@ -88,19 +99,24 @@ inline bool derive_x25519_shared_secret(const PrivKey256& our_private_key,
 }
 
 
-// derive a fixed 16-byte IV deterministically from a 32-byte key for stream cipher mode
+// derive a 16-byte IV from the derived key
 inline IV128 derive_iv_from_key(const Key256& key){
+    uint8_t digest[SHA256_DIGEST_LENGTH];
+    SHA256_CTX sha;
+    SHA256_Init(&sha);
+    SHA256_Update(&sha, "ctr-iv-v1", 9);
+    SHA256_Update(&sha, key.data(), key.size());
+    SHA256_Final(digest, &sha);
+
     IV128 iv{};
-    for(size_t i = 0; i < IV_SIZE; ++i){
-        iv[i] = static_cast<uint8_t>(key[i] ^ key[i + IV_SIZE] ^ (0x5A + i));
-    }
+    std::memcpy(iv.data(), digest, IV_SIZE);
     return iv;
 }
 
 
-// encrypt/decrypt (symmetric stream cipher operation)
-inline bool crypt_in_place_aes_ctr(const Key256& key, uint8_t* data, size_t len){
-    if(!data || len == 0){
+// encrypt/decrypt discontiguous buffers as a single continuous AES-256-CTR stream
+inline bool crypt_in_place_aes_ctr_sg(const Key256& key, const BufferSlice* slices, size_t count){
+    if(!slices || count == 0){
         return true;
     }
 
@@ -113,10 +129,22 @@ inline bool crypt_in_place_aes_ctr(const Key256& key, uint8_t* data, size_t len)
 
     bool success = false;
     if(EVP_CipherInit_ex(ctx, EVP_aes_256_ctr(), nullptr, key.data(), iv.data(), 1) == 1){
-        int outlen = 0;
-        if(EVP_CipherUpdate(ctx, data, &outlen, data, static_cast<int>(len)) == 1){
+        bool all_updated = true;
+        for(size_t i = 0; i < count; ++i){
+            if(!slices[i].data || slices[i].len == 0){
+                continue;
+            }
+            int outlen = 0;
+            if(EVP_CipherUpdate(ctx, slices[i].data, &outlen, slices[i].data, static_cast<int>(slices[i].len)) != 1){
+                all_updated = false;
+                break;
+            }
+        }
+
+        if(all_updated){
             int final_outlen = 0;
-            if(EVP_CipherFinal_ex(ctx, data + outlen, &final_outlen) == 1){
+            uint8_t dummy[16];
+            if(EVP_CipherFinal_ex(ctx, dummy, &final_outlen) == 1){
                 success = true;
             }
         }
@@ -124,6 +152,13 @@ inline bool crypt_in_place_aes_ctr(const Key256& key, uint8_t* data, size_t len)
 
     EVP_CIPHER_CTX_free(ctx);
     return success;
+}
+
+
+// single-buffer convenience overload
+inline bool crypt_in_place_aes_ctr(const Key256& key, uint8_t* data, size_t len){
+    BufferSlice slice{data, len};
+    return crypt_in_place_aes_ctr_sg(key, &slice, 1);
 }
 
 
@@ -152,21 +187,43 @@ struct EphemeralDH{
 };
 
 
-// helper functions
-inline bool encrypt_layer_ce(const Key256& sh_ce, uint8_t* phdr_and_payload, size_t len) {
+// helper functions (single-buffer and scatter-gather)
+inline bool encrypt_layer_ce(const Key256& sh_ce, uint8_t* phdr_and_payload, size_t len){
     return crypt_in_place_aes_ctr(sh_ce, phdr_and_payload, len);
 }
 
-inline bool decrypt_layer_ce(const Key256& sh_ce, uint8_t* phdr_and_payload, size_t len) {
+
+inline bool encrypt_layer_ce(const Key256& sh_ce, std::initializer_list<BufferSlice> slices){
+    return crypt_in_place_aes_ctr_sg(sh_ce, slices.begin(), slices.size());
+}
+
+
+inline bool decrypt_layer_ce(const Key256& sh_ce, uint8_t* phdr_and_payload, size_t len){
     return crypt_in_place_aes_ctr(sh_ce, phdr_and_payload, len);
 }
 
-inline bool encrypt_layer_cr(const Key256& sh_cr, uint8_t* thdr_and_rest, size_t len) {
+
+inline bool decrypt_layer_ce(const Key256& sh_ce, std::initializer_list<BufferSlice> slices){
+    return crypt_in_place_aes_ctr_sg(sh_ce, slices.begin(), slices.size());
+}
+
+
+inline bool encrypt_layer_cr(const Key256& sh_cr, uint8_t* thdr_and_rest, size_t len){
     return crypt_in_place_aes_ctr(sh_cr, thdr_and_rest, len);
 }
 
-inline bool decrypt_layer_cr(const Key256& sh_cr, uint8_t* thdr_and_rest, size_t len) {
+
+inline bool encrypt_layer_cr(const Key256& sh_cr, std::initializer_list<BufferSlice> slices){
+    return crypt_in_place_aes_ctr_sg(sh_cr, slices.begin(), slices.size());
+}
+
+
+inline bool decrypt_layer_cr(const Key256& sh_cr, uint8_t* thdr_and_rest, size_t len){
     return crypt_in_place_aes_ctr(sh_cr, thdr_and_rest, len);
 }
 
+
+inline bool decrypt_layer_cr(const Key256& sh_cr, std::initializer_list<BufferSlice> slices){
+    return crypt_in_place_aes_ctr_sg(sh_cr, slices.begin(), slices.size());
+}
 } // namespace crypto

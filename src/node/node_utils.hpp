@@ -437,6 +437,7 @@ struct RelayInfo{
     // todo: relay performance
     mutable std::array<uint8_t, 32> sh_cr{};
 
+
     bool operator==(const RelayInfo& other) const{
         return endpoint == other.endpoint;
     }
@@ -600,6 +601,7 @@ public:
         return asio::ip::address_v6(bytes);
     }
 
+
     static asio::ip::udp::endpoint& choose_exit(std::vector<asio::ip::udp::endpoint> exits){
         std::uniform_int_distribution<std::size_t> dist(0, exits.size() - 1);
         return exits[dist(gen_)];
@@ -610,8 +612,23 @@ public:
 };
 
 
-inline bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays){
+inline bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unordered_set<RelayInfo>& existing_relays,
+                             uint16_t our_port = 0, asio::ip::address our_public_address = asio::ip::make_address("192.168.0.101"),
+                             std::initializer_list<asio::ip::udp::endpoint> ignore_endpoints = {
+                                 asio::ip::udp::endpoint(asio::ip::make_address("192.168.0.101"), 6969),
+                                 asio::ip::udp::endpoint(asio::ip::make_address("127.0.0.1"), 6969),
+                             }){
     // FIXME: remove this, just for testing
+    if(ep.address().is_loopback() && ep.port() == our_port)
+        return false;
+    if(ep.address() == our_public_address && ep.port() == our_port)
+        return false;
+    if(ep.port() == 6969)
+        return false;
+    for(auto& t: ignore_endpoints){
+        if(ep == t)
+            return false;
+    }
     return true;
 
     // fixme: can't we do anything for ipv6 :(

@@ -2,3 +2,5 @@ build
 .vscode
 .DS_Store
 local_testing/logs/
+*.sync-conflict-*
+.stfolder

@@ -165,8 +165,10 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
     std::memcpy(header_buf->data() + offset, &phdr, PAYLOAD_HDR_SZ);
 
     // encrypt using sh_ce: phdr + ip payload
-    crypto::encrypt_layer_ce(circuit_info->sh_ce, header_buf->data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, PAYLOAD_HDR_SZ);
-    crypto::encrypt_layer_ce(circuit_info->sh_ce, raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes);
+    crypto::encrypt_layer_ce(circuit_info->sh_ce, {
+                                 {.data = header_buf->data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, .len = PAYLOAD_HDR_SZ},
+                                 {.data = raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, .len = app_internal_bytes}
+                             });
 
     size_t outgoing_bytes = HEADER_SZ + app_internal_bytes;
     const std::array<asio::const_buffer, 2> outgoing = {
@@ -177,6 +179,8 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
     std::shared_ptr<asio::ip::udp::socket> sock = (relay->endpoint.protocol() == asio::ip::udp::v4())
                                                       ? udp_socketv4_
                                                       : udp_socketv6_;
+
+    LOG_DEBUG(logger_, "Sending back packet: cid: {}, seq_id: {}", circuit_info->circuit_id, seq_id);
 
     // @formatter:off
     sock->async_send_to(
@@ -274,6 +278,9 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 LOG_ERROR(logger_, "Exit failed to compute shared secret SH_CE with client for cid: {}", cid);
                 return;
             }
+            LOG_DEBUG(logger_, "Computed shared key successfully.");
+            LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                      sh_ce[0], sh_ce[1], sh_ce[2], sh_ce[3], sh_ce[4], sh_ce[5], sh_ce[6], sh_ce[7]);
 
             // insert cid in cid_ci_umap_
             {
@@ -300,6 +307,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 });
 
                 cid_ci_umap_.put(cid, ci);
+                LOG_DEBUG(logger_, "updated cid_ci_umap_, cid: {}", cid);
             }
 
             // update sant_nt_ci_umap_/nt_ci_umap_ (assign virtual ip to client, use that for nt_ci)
@@ -422,8 +430,14 @@ circuit_id is at the start
     // decrypt using sh_ce
     auto circuit_info = cid_ci_umap_.get(packet->cid);
     if(circuit_info){
+        LOG_DEBUG(logger_, "EXIT: DECRYPTING, cid: {}", packet->cid);
+        LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            circuit_info->sh_ce[0], circuit_info->sh_ce[1], circuit_info->sh_ce[2], circuit_info->sh_ce[3], circuit_info->sh_ce[4], circuit_info->sh_ce[5], circuit_info->sh_ce[6], circuit_info->sh_ce[7]);
         size_t inner_len = packet->bytes_received - (sizeof(RoutingFlag) + TRANSIT_HDR_SZ);
         crypto::decrypt_layer_ce(circuit_info->sh_ce, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, inner_len);
+    }
+    else{
+        LOG_DEBUG(logger_, "COULDN'T FIND ci: {}, didn't decrypt.", packet->cid);
     }
 
     constexpr size_t min_data_sz = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;

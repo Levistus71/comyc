@@ -82,7 +82,7 @@ Client::~Client(){
 
 void Client::update_relays(){
     std::lock_guard lock(known_relays_->registry_mutex_);
-    for(auto& relay_info : known_relays_->all_relays){
+    for(auto& relay_info: known_relays_->all_relays){
         sid_ri_umap_.put_if_absent(relay_info.session_id, std::make_shared<RelayInfo>(relay_info));
     }
 }
@@ -111,7 +111,6 @@ void Client::update_relays(){
                 else{
                     LOG_INFO(logger_, "Added relay {} to utun routes.", rinfo.endpoint.address().to_string());
                 }
-
             }
         }
         // add exit routes
@@ -206,6 +205,7 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr) [[unlikely]] {
         ci = track_new_nt(nt, raw_packet);
+        LOG_DEBUG(logger_, "new nt");
         if(ci == nullptr)
             return;
     }
@@ -248,13 +248,17 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
     });
 
     // encrypt sh_ce: phdr and ip payload
-    crypto::encrypt_layer_ce(ci->sh_ce, reinterpret_cast<uint8_t*>(&headers->phdr), sizeof(PayloadHeader));
-    crypto::encrypt_layer_ce(ci->sh_ce, raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes);
+    crypto::encrypt_layer_ce(ci->sh_ce, {
+                                 {.data = reinterpret_cast<uint8_t*>(&headers->phdr), .len = sizeof(PayloadHeader)},
+                                 {.data = raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, .len = app_internal_bytes}
+                             });
 
     // encrypt sh_cr: encrypt thdr, phdr, and IP payload
     // Note: session_id and route_flag remain plaintext for the Relay to read
-    crypto::encrypt_layer_cr(relay->sh_cr, reinterpret_cast<uint8_t*>(&headers->thdr), TRANSIT_HDR_SZ + sizeof(PayloadHeader));
-    crypto::encrypt_layer_cr(relay->sh_cr, raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, app_internal_bytes);
+    crypto::encrypt_layer_cr(relay->sh_cr, {
+                                 {.data = reinterpret_cast<uint8_t*>(&headers->thdr), .len = TRANSIT_HDR_SZ + sizeof(PayloadHeader)},
+                                 {.data = raw_packet->payload.data() + FAMILY_HDR_UTUN_SZ, .len = app_internal_bytes}
+                             });
 
     size_t outgoing_bytes = sizeof(ClientFullHeaders) + app_internal_bytes;
     const std::array<asio::const_buffer, 2> outgoing = {
@@ -265,6 +269,10 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
     std::shared_ptr<asio::ip::udp::socket> sock = (relay->endpoint.protocol() == asio::ip::udp::v4())
                                                       ? udp_socketv4_
                                                       : udp_socketv6_;
+
+    LOG_DEBUG(logger_, "sending packet through circuit_id: {}, sequence_number: {}", ci->circuit_id, seq_id);
+    LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+              ci->sh_ce[0], ci->sh_ce[1], ci->sh_ce[2], ci->sh_ce[3], ci->sh_ce[4], ci->sh_ce[5], ci->sh_ce[6], ci->sh_ce[7]);
 
     // @formatter:off
     sock->async_send_to(
@@ -352,6 +360,7 @@ void Client::compute_new_nt_ci(std::shared_ptr<OngoingCircuitCalcInfo> cci){
         .circuit_id       = default_ci_->circuit_id,
         .sequence_id_ptr  = default_ci_->sequence_id_ptr,
         .relays           = default_ci_->relays,
+        .sh_ce            = default_ci_->sh_ce,
         .reorder_buffer   = default_ci_->reorder_buffer,
         .nt               = cci->nt,
         .activity_counter = std::make_shared<Statistics<10>>(),
@@ -468,7 +477,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
     if(relay_list.size() < Settings::DEFAULT_NUM_ENTRY_RELAYS){
         LOG_INFO(logger_, "Couldn't make new circuit, not enough relays. Tried choosing from: {}, needed: {}",
-            relay_list.size(), Settings::DEFAULT_NUM_ENTRY_RELAYS);
+                 relay_list.size(), Settings::DEFAULT_NUM_ENTRY_RELAYS);
         co_return false;
     }
 
@@ -613,6 +622,8 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
         exit_start_seq = response.start_seq_exit;
         LOG_INFO(logger_, "Setup connection for exit.");
+        LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                  sh_ce[0], sh_ce[1], sh_ce[2], sh_ce[3], sh_ce[4], sh_ce[5], sh_ce[6], sh_ce[7]);
     }
     else{
         LOG_ERROR(logger_, "Couldn't connect to exit : {}", std::get<Node::CommError>(res).what());
@@ -621,7 +632,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
     auto final_ci = std::make_shared<CircuitInfo>(CircuitInfo{
         .circuit_id       = assigned_cid,
-        .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(exit_start_seq),
+        .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(our_start_seq),
         .relays           = selected_relays,
         .sh_ce            = sh_ce,
         .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 2048, exit_start_seq, logger_),
@@ -639,11 +650,17 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     // NOTE: if a packet using new circuit goes in faster than ones with the old circuit, god (or the app) handles it
     if(nt.has_value()){
         nt_ci_umap_.put(nt.value(), final_ci);
-        LOG_INFO(logger_, "New circuit successfully setup.");
+        LOG_INFO(logger_, "New circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
+                 exit_start_seq, our_start_seq, final_ci->circuit_id);
+        LOG_DEBUG(logger_, "New circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
+                  exit_start_seq, our_start_seq, final_ci->circuit_id);
     }
     else{
         default_ci_ = final_ci;
-        LOG_INFO(logger_, "Default circuit successfully setup.");
+        LOG_INFO(logger_, "Default circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
+                 exit_start_seq, our_start_seq, final_ci->circuit_id);
+        LOG_DEBUG(logger_, "Default circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
+                  exit_start_seq, our_start_seq, final_ci->circuit_id);
     }
     co_return true;
 }

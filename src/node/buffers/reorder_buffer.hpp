@@ -39,14 +39,14 @@ public:
                            seq_t start_seq = 0,
                            quill::Logger* logger = nullptr,
                            duration_t estimated_circuit_rtt = duration_t(Settings::ESTIMATED_CIRCUIT_RTT_START)):
-        logger_(logger),
         timer_(ioc),
         buffer_(capacity),
         capacity_(capacity),
         head_(start_seq),
         smoothed_rtt_us_(static_cast<double>(estimated_circuit_rtt.count())),
         rtt_var_us_(smoothed_rtt_us_ / 4.0),
-        timer_active_(false){
+        timer_active_(false),
+        logger_(logger){
         if(capacity == 0)
             throw std::invalid_argument("Capacity must be > 0.");
 
@@ -57,7 +57,7 @@ public:
     [[nodiscard]] bool insert(seq_t seq, T&& item){
         auto diff = static_cast<std::make_signed_t<seq_t>>(seq - head_);
         if(diff < 0 || static_cast<size_t>(diff) >= capacity_){
-            log_error("Couldn't insert: diff: {}, capacity: {}", diff, capacity_);
+            log_error("Couldn't insert: diff: {}, capacity: {}, head: {}, seq: {}", diff, capacity_, head_, seq);
             return false;
         }
 

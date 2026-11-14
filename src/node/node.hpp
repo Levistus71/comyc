@@ -106,6 +106,9 @@ public:
                                                       std::shared_ptr<Client> client);
 
 
+    // todo: hardcoded ^ (192.168.0.101)
+
+
     /* ALWAYS COAWAIT THIS FUNCTION, RELAY PASSED IN BY REFERENCE */
     /* TODO: PASS IN A SHARED_PTR FOR FUTURE SAFETY */
     static asio::awaitable<CommError> establish_connection(const RelayInfo& relay,

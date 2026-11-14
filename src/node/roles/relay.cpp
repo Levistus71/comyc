@@ -240,7 +240,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
                 std::lock_guard<std::mutex> lock(mut);
                 auto rinfo = RelayInfo{.session_id = requested_sid, .endpoint = sender_endpoint, .sh_cr = sh_cr};
                 known_relays_->all_relays.insert(rinfo);
-                if(!known_relays_->usable_relays.contains(rinfo) && is_relay_diverse(rinfo.endpoint, known_relays_->usable_relays)){
+                if(!known_relays_->usable_relays.contains(rinfo) && is_relay_diverse(rinfo.endpoint, known_relays_->usable_relays, udp_socketv4_->local_endpoint().port())){
                     known_relays_->usable_relays.insert(rinfo);
                 }
             }
@@ -496,7 +496,7 @@ void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
     }
     packet->sid = client_info->session_id;
 
-    // encrypt(packet->payload + sizeof(circuit_id_t), client_info->sh_cr);
+    // encrypt(packet->payload + sizeof(routing_flag), client_info->sh_cr);
     crypto::encrypt_layer_cr(client_info->sh_cr, packet->payload.data() + packet->start_offset, packet->payload_bytes);
 
     /*

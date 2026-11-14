@@ -183,6 +183,7 @@ void Node::stop(){
     LOG_INFO(logger_, "Stopped.");
 }
 
+
 // todo: known_relay lock (since it's called from start() right now, its safe, it might not be in the future)
 asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInfoGlb> known_relays,
                                                        RelayInfo start_relay,
@@ -232,7 +233,9 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
             }
         }
 
-        if(!known_relays->usable_relays.contains(current) && is_relay_diverse(current.endpoint, known_relays->usable_relays)){
+        if(!known_relays->usable_relays.contains(current) && is_relay_diverse(current.endpoint,
+                                                                              known_relays->usable_relays,
+                                                                              udp_sockv4->local_endpoint().port())){
             known_relays->usable_relays.insert(current);
         }
 
@@ -264,7 +267,9 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
     for(const auto& relay: known_relays->all_relays){
         if(known_relays->usable_relays.size() >= DESIRED_RELAY_COUNT)
             break;
-        if(known_relays->usable_relays.contains(relay) || !is_relay_diverse(relay.endpoint, known_relays->usable_relays))
+        if(known_relays->usable_relays.contains(relay) || !is_relay_diverse(relay.endpoint,
+                                                                            known_relays->usable_relays,
+                                                                            udp_sockv4->local_endpoint().port()))
             continue;
         if(co_await establish_connection(relay, udp_sockv4, known_relays, logger)){
             LOG_INFO(logger, "Couldn't connect to relay: {}:{}", relay.endpoint.address().to_string(), relay.endpoint.port());
@@ -550,7 +555,7 @@ void Node::listenv6(ArenaSlot<IncomingCell> packet){
 
 void Node::loop_listen(ArenaSlot<IncomingCell> packet, const boost::system::error_code& ec, bool ipv4){
     if(ec){
-        if(ec.message()=="Operation canceled"){
+        if(ec.message() == "Operation canceled"){
             LOG_INFO(logger_, "Stopped listening.");
             return;
         }

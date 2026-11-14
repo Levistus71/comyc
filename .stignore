@@ -1,0 +1,6 @@
+(?d)build
+(?d).vscode
+(?d)/local_testing/logs
+(?d).git
+(?d).idea
+(?d).DS_Store
