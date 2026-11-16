@@ -632,6 +632,9 @@ int Utun::get_fd() const{
     rt.rt_flags = RTF_UP | RTF_GATEWAY;
     const unsigned long cmd = enable ? SIOCADDRT : SIOCDELRT;
     const bool ret = (::ioctl(sock, cmd, &rt) >= 0);
+    if(ret){
+        LOG_ERROR(logger, "[TUN] modify_route_v4 write failed: {} (errno={})", std::strerror(errno), errno);
+    }
     ::close(sock);
     return ret;
 #endif
@@ -714,6 +717,9 @@ int Utun::get_fd() const{
 
     const unsigned long cmd = enable ? SIOCADDRT : SIOCDELRT;
     const bool ret = (::ioctl(sock, cmd, &rt6) >= 0);
+    if(ret){
+        LOG_ERROR(logger, "[TUN] modify_route_v4 write failed: {} (errno={})", std::strerror(errno), errno);
+    }
     ::close(sock);
     return ret;
 #endif
@@ -1012,32 +1018,69 @@ bool is_local_or_loopback(const asio::ip::address& addr){
     }
 }
 
+#include <cerrno>
+#include <cstdio>
+
+// Helper for writing sysctl values on Linux
+#if defined(__linux__)
+namespace {
+bool write_proc_sysctl(const std::string& path, const std::string& value) {
+    std::ofstream file(path);
+    if (!file.is_open()) {
+        return false;
+    }
+    file << value;
+    return file.good();
+}
+} // namespace
+#endif
 
 // doesn't act as nat, just forwards packets with the same ip it came with
-bool Utun::enable_ip_forwarding() const{
+bool Utun::enable_ip_forwarding() const {
+#if defined(__APPLE__)
     int enable = 1;
-    if(sysctlbyname("net.inet.ip.forwarding", nullptr, nullptr, &enable, sizeof(enable)) != 0){
+    if (sysctlbyname("net.inet.ip.forwarding", nullptr, nullptr, &enable, sizeof(enable)) != 0) {
         LOG_ERROR(logger_, "sysctlbyname(net.inet.ip.forwarding) failed: {}", std::strerror(errno));
         return false;
     }
     LOG_INFO(logger_, "ipv4 forwarding enabled.");
 
-    if(sysctlbyname("net.inet6.ip6.forwarding", nullptr, nullptr, &enable, sizeof(enable)) != 0){
+    if (sysctlbyname("net.inet6.ip6.forwarding", nullptr, nullptr, &enable, sizeof(enable)) != 0) {
         LOG_ERROR(logger_, "sysctlbyname(net.inet6.ip6.forwarding) failed: {}", std::strerror(errno));
         return false;
     }
     LOG_INFO(logger_, "ipv6 forwarding enabled.");
 
     return true;
+
+#elif defined(__linux__)
+    if (!write_proc_sysctl("/proc/sys/net/ipv4/ip_forward", "1")) {
+        LOG_ERROR(logger_, "Failed to enable IPv4 forwarding via /proc/sys/net/ipv4/ip_forward: {}", std::strerror(errno));
+        return false;
+    }
+    LOG_INFO(logger_, "ipv4 forwarding enabled.");
+
+    if (!write_proc_sysctl("/proc/sys/net/ipv6/conf/all/forwarding", "1")) {
+        LOG_ERROR(logger_, "Failed to enable IPv6 forwarding via /proc/sys/net/ipv6/conf/all/forwarding: {}", std::strerror(errno));
+        return false;
+    }
+    LOG_INFO(logger_, "ipv6 forwarding enabled.");
+
+    return true;
+
+#else
+    LOG_ERROR(logger_, "enable_ip_forwarding is not supported on this platform.");
+    return false;
+#endif
 }
 
-
 // actual nat
-bool Utun::enable_exit_nat(const std::string& external_interface) const{
-    if(!enable_ip_forwarding()){
+bool Utun::enable_exit_nat(const std::string& external_interface) const {
+    if (!enable_ip_forwarding()) {
         return false;
     }
 
+#if defined(__APPLE__)
     std::system("pfctl -e >/dev/null 2>&1");
 
     const std::string anchor(nat_service_name);
@@ -1102,10 +1145,64 @@ bool Utun::enable_exit_nat(const std::string& external_interface) const{
 
     LOG_INFO(logger_, "Exit NAT enabled on {} for {} (anchor: {})", external_interface, utun_name_, anchor);
     return true;
+
+#elif defined(__linux__)
+    // Use dedicated iptables chains named after nat_service_name for clean isolation & teardown
+    const std::string chain_nat = std::string(nat_service_name) + "_NAT";
+    const std::string chain_fwd = std::string(nat_service_name) + "_FWD";
+
+    // 1. Create custom chains and hook them into POSTROUTING and FORWARD
+    std::string setup_cmds =
+        "iptables -t nat -N " + chain_nat + " && "
+        "iptables -t nat -I POSTROUTING 1 -j " + chain_nat + " && "
+        "iptables -N " + chain_fwd + " && "
+        "iptables -I FORWARD 1 -j " + chain_fwd;
+
+    if (std::system(setup_cmds.c_str()) != 0) {
+        LOG_ERROR(logger_, "Failed to initialize iptables chains ({}, {})", chain_nat, chain_fwd);
+        return false;
+    }
+
+    // 2. Add MASQUERADE rules for RFC1918 + CGNAT ranges exiting external_interface
+    const std::vector<std::string> subnets = {
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"
+    };
+
+    for (const auto& subnet : subnets) {
+        std::string nat_rule = "iptables -t nat -A " + chain_nat +
+                               " -s " + subnet + " -o " + external_interface + " -j MASQUERADE";
+        if (std::system(nat_rule.c_str()) != 0) {
+            LOG_ERROR(logger_, "Failed to apply iptables MASQUERADE rule for {}", subnet);
+            return false;
+        }
+    }
+
+    // 3. Allow bidirectional forwarding between the TUN interface and external interface
+    std::string fwd_rules =
+        "iptables -A " + chain_fwd + " -i " + utun_name_ + " -o " + external_interface + " -j ACCEPT && "
+        "iptables -A " + chain_fwd + " -i " + external_interface + " -o " + utun_name_ +
+        " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT";
+
+    if (std::system(fwd_rules.c_str()) != 0) {
+        LOG_ERROR(logger_, "Failed to apply iptables FORWARD rules for {}", utun_name_);
+        return false;
+    }
+
+    // Save external_interface in a member variable if needed, or store it for cleanup
+
+    LOG_INFO(logger_, "Exit NAT enabled on {} for {} (chains: {}, {})",
+             external_interface, utun_name_, chain_nat, chain_fwd);
+    return true;
+
+#else
+    (void)external_interface;
+    LOG_ERROR(logger_, "enable_exit_nat is not supported on this platform.");
+    return false;
+#endif
 }
 
-
-bool Utun::disable_exit_nat(){
+bool Utun::disable_exit_nat() {
+#if defined(__APPLE__)
     const std::string anchor(nat_service_name);
     const std::string command = "pfctl -a " + anchor + " -F all >/dev/null 2>&1";
     int rc = std::system(command.c_str());
@@ -1119,4 +1216,27 @@ bool Utun::disable_exit_nat(){
 
     LOG_INFO(logger_, "Exit NAT disabled (flushed anchor: {})", anchor);
     return true;
+
+#elif defined(__linux__)
+    const std::string chain_nat = std::string(nat_service_name) + "_NAT";
+    const std::string chain_fwd = std::string(nat_service_name) + "_FWD";
+
+    // Unhook, flush, and delete our custom chains cleanly without disturbing Docker/UFW rules
+    std::string cleanup_cmds =
+        "iptables -t nat -D POSTROUTING -j " + chain_nat + " >/dev/null 2>&1; "
+        "iptables -t nat -F " + chain_nat + " >/dev/null 2>&1; "
+        "iptables -t nat -X " + chain_nat + " >/dev/null 2>&1; "
+        "iptables -D FORWARD -j " + chain_fwd + " >/dev/null 2>&1; "
+        "iptables -F " + chain_fwd + " >/dev/null 2>&1; "
+        "iptables -X " + chain_fwd + " >/dev/null 2>&1";
+
+    std::system(cleanup_cmds.c_str());
+
+    LOG_INFO(logger_, "Exit NAT disabled (removed iptables chains: {}, {})", chain_nat, chain_fwd);
+    return true;
+
+#else
+    LOG_ERROR(logger_, "disable_exit_nat is not supported on this platform.");
+    return false;
+#endif
 }

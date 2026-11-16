@@ -530,8 +530,15 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
 
 
 void Node::listenv4(ArenaSlot<IncomingCell> packet){
+    if (!packet) {
+        LOG_ERROR(logger_, "listenv4 was called with null packet.");
+        return;
+    }
+
+    auto recv_buf = asio::buffer(packet->payload);
+
     udp_socketv4_->async_receive_from(
-        asio::buffer(packet->payload),
+        recv_buf,
         (*sender_endpoint_),
         [me=shared_from_this(), pkt = std::move(packet)](const boost::system::error_code& ec, const size_t bytes_received) mutable{
             pkt->bytes_received = bytes_received;
@@ -542,8 +549,15 @@ void Node::listenv4(ArenaSlot<IncomingCell> packet){
 
 
 void Node::listenv6(ArenaSlot<IncomingCell> packet){
+    if (!packet) {
+        LOG_ERROR(logger_, "listenv6 was called with null packet.");
+        return;
+    }
+
+    auto recv_buf = asio::buffer(packet->payload);
+
     udp_socketv6_->async_receive_from(
-        asio::buffer(packet->payload),
+        recv_buf,
         (*sender_endpoint_),
         [me=shared_from_this(), pkt = std::move(packet)](const boost::system::error_code& ec, const size_t bytes_received) mutable{
             pkt->bytes_received = bytes_received;
