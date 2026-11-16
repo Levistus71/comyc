@@ -6,7 +6,8 @@
 
 Exit::Exit(asio::io_context& ioc,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
-           std::shared_ptr<asio::ip::udp::socket> udp_socketv6):
+           std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
+           const std::shared_ptr<network_stats::StatsReporter>& stats_reporter):
     ioc_(ioc),
     udp_socketv4_(std::move(udp_socketv4)),
     udp_socketv6_(std::move(udp_socketv6)),
@@ -14,7 +15,8 @@ Exit::Exit(asio::io_context& ioc,
     raw_packet_pool_(16384, "exit_logger"),
     utun_strand_(asio::make_strand(ioc)),
     utun_stream_(utun_strand_),
-    utun_("exit_logger"){
+    utun_("exit_logger"),
+    stats_reporter_(stats_reporter){
     logger_ = quill::Frontend::get_logger("exit_logger");
 }
 
@@ -67,6 +69,7 @@ void Exit::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
         asio::buffer(raw_packet->payload),
         [me=shared_from_this(), rp = std::move(raw_packet)](const boost::system::error_code& ec, std::size_t bytes_xfer) mutable{
             rp->bytes_received = bytes_xfer;
+            me->stats_reporter_->stats.on_utun_received(bytes_xfer);
             me->loop_utun(std::move(rp), ec);
         }
     );
@@ -76,6 +79,7 @@ void Exit::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
 void Exit::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::error_code const& ec){
     if(ec){
         LOG_ERROR(logger_, "Raw packet read failed: {}", ec.message());
+        stats_reporter_->stats.on_utun_drop();
         return;
     }
 
@@ -92,6 +96,7 @@ void Exit::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::error
 void Exit::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     if(!raw_packet->parse_packet()){
         LOG_ERROR(logger_, "Dropping faulty packet from utun, couldn't parse properly.");
+        stats_reporter_->stats.on_utun_drop();
         return;
     }
 
@@ -133,6 +138,7 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
     const auto relay = choose_relay(circuit_info);
     if(!relay){
         LOG_WARNING(logger_, "No relay available to send packet for cid {}", circuit_info->circuit_id);
+        stats_reporter_->stats.on_utun_drop();
         return;
     }
 
@@ -189,6 +195,7 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
         // NOTE: compiler shouldn't theoretically optimize this packet out of the capture list.
         [me=shared_from_this(), outgoing_bytes, keep_alive1 = std::move(raw_packet), keep_alive2 = header_buf]
         (const boost::system::error_code& ec, std::size_t bytes_xfer){
+            me->stats_reporter_->stats.on_packet_sent(bytes_xfer);
             if(ec){
                 LOG_ERROR(me->logger_, "Send failed: {}", ec.message());
                 return;
@@ -216,11 +223,13 @@ std::shared_ptr<RelayInfo> Exit::choose_relay(const std::shared_ptr<CircuitInfo>
 void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint sender_endpoint){
     if(!packet){
         LOG_WARNING(logger_, "Recieved empty packet.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
     if(!parse_headers_incoming_packet(packet)){
         LOG_WARNING(logger_, "Failed to parse incoming packet.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -239,6 +248,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
     const size_t min_sz = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ;
     if(packet->bytes_received < min_sz){
         LOG_WARNING(logger_, "Dropping control packet at exit: size too small ({})", packet->bytes_received);
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -255,6 +265,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
         case ControlMsgType::EXIT_HANDSHAKE_REQ: {
             if(body_len < sizeof(ExitHandshakeReq)){
                 LOG_WARNING(logger_, "ExitCircuitCreateReq payload too small.");
+                stats_reporter_->stats.on_malformed_packet();
                 return;
             }
             ExitHandshakeReq req{};
@@ -275,6 +286,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
             std::memcpy(peer_pubkey.data(), req.public_key, sizeof(peer_pubkey));
             if(!dh.compute_shared_secret(peer_pubkey, sh_ce)){
                 LOG_ERROR(logger_, "Exit failed to compute shared secret SH_CE with client for cid: {}", cid);
+                stats_reporter_->stats.on_crypto_failure();
                 return;
             }
 
@@ -339,7 +351,8 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
             sock->async_send_to(
                 asio::buffer(*send_data),
                 relay_endpoint,
-                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, const size_t bytes_xfer){
+                    me->stats_reporter_->stats.on_packet_sent(bytes_xfer);
                     if(ec){
                         LOG_ERROR(me->logger_, "Failed to send ExitCircuitCreateRes: {}", ec.message());
                     }
@@ -350,6 +363,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
 
         default:
             LOG_WARNING(logger_, "Unhandled control message: {}", static_cast<int>(chdr.msg_type));
+            stats_reporter_->stats.on_malformed_packet();
             break;
     }
 }
@@ -460,6 +474,7 @@ void Exit::insert_into_rob(ArenaSlot<IncomingCell> packet){
 
     if(!circuit_info){
         LOG_WARNING(logger_, "Recieved incoming packet with unknown cid: {}", packet->cid);
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -473,6 +488,7 @@ void Exit::insert_into_rob(ArenaSlot<IncomingCell> packet){
         )
     ){
         LOG_WARNING(logger_, "Reorder buffer insert failed.");
+        stats_reporter_->stats.on_utun_drop();
     }
 }
 
@@ -510,11 +526,12 @@ void Exit::do_write_utun(sequence_id_t seq_id){
     auto bufs = asio::buffer(pkt->payload.data() + pkt->start_offset, pkt->payload_bytes);
 #endif
 
-    auto lmb = [me = shared_from_this(), seq_id](const boost::system::error_code& ec, std::size_t /*bytes_transferred*/){
+    auto lmb = [me = shared_from_this(), seq_id](const boost::system::error_code& ec, std::size_t bytes_xfer){
         if(ec){
             LOG_ERROR(me->logger_, "utun write error (seq {}): {}", seq_id, ec.message());
         }
 
+        me->stats_reporter_->stats.on_utun_sent(bytes_xfer);
         // stranded
         me->utun_write_queue_.pop_front();
         me->do_write_utun(seq_id);

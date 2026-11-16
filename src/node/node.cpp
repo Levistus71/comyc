@@ -19,6 +19,7 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
     ioc_(ioc),
     incoming_cell_pool_(Settings::ARENA_POOL_SIZE, "node_logger"){
     logger_ = quill::Frontend::get_logger("node_logger");
+    stats_reporter_ = std::make_shared<network_stats::StatsReporter>(ioc_, logger_);
     using udp = asio::ip::udp;
 
     udp_socketv4_ = std::make_shared<udp::socket>(ioc_);
@@ -58,14 +59,14 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
             exit_endpoint = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 6969);
         }
 
-        client_ = std::make_shared<Client>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_, exit_endpoint);
+        client_ = std::make_shared<Client>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_, exit_endpoint, stats_reporter_);
     }
 
     if(is_relay)
-        relay_ = std::make_shared<Relay>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_);
+        relay_ = std::make_shared<Relay>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_, stats_reporter_);
 
     if(is_exit)
-        exit_ = std::make_shared<Exit>(ioc_, udp_socketv4_, udp_socketv6_);
+        exit_ = std::make_shared<Exit>(ioc_, udp_socketv4_, udp_socketv6_, stats_reporter_);
 }
 
 
@@ -74,6 +75,8 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
         LOG_ERROR(logger_, "start() called when running_.");
         co_return false;
     }
+
+    stats_reporter_->start();
 
     using udp = asio::ip::udp;
     boost::system::error_code ec;
@@ -123,12 +126,12 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
             LOG_INFO(logger_, "I'm Bootstrap Bill, skipping establish_connection...");
         }
         else{
-            if(CommError e = co_await establish_connection(bootstrap_node_, udp_socketv4_, relays_info_glb_, logger_); e){
+            if(CommError e = co_await establish_connection(bootstrap_node_, udp_socketv4_, relays_info_glb_, logger_, stats_reporter_); e){
                 LOG_ERROR(logger_, "failed to talk to Bill Turner (bootstrap): {}", e.what());
                 co_return false;
             }
             LOG_INFO(logger_, "Successfully connected to Bill Turner (bootstrap)");
-            co_await populate_relays(relays_info_glb_, bootstrap_node_, udp_socketv4_, logger_, client_);
+            co_await populate_relays(relays_info_glb_, bootstrap_node_, udp_socketv4_, logger_, client_, stats_reporter_);
         }
     }
 
@@ -158,6 +161,8 @@ void Node::stop(){
         LOG_ERROR(logger_, "stop() called when not running_.");
         return;
     }
+
+    stats_reporter_->stop();
 
     if(client_ != nullptr)
         client_->stop();
@@ -189,7 +194,8 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
                                                        RelayInfo start_relay,
                                                        std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                        quill::Logger* logger,
-                                                       std::shared_ptr<Client> client){
+                                                       std::shared_ptr<Client> client,
+                                                       std::shared_ptr<network_stats::StatsReporter> stats_reporter){
     if(!known_relays)
         co_return CommError(true, "known_relays is nullptr");
     if(start_relay.session_id == std::numeric_limits<session_id_t>::max())
@@ -220,7 +226,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
 
         if(!current.is_connected()){
             LOG_INFO(logger, "Trying to establish connection new relay");
-            if(co_await establish_connection(current, udp_sockv4, known_relays, logger))
+            if(co_await establish_connection(current, udp_sockv4, known_relays, logger, stats_reporter))
                 continue;
             auto it = known_relays->all_relays.find(current);
             if(it != known_relays->all_relays.end()){
@@ -244,7 +250,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
 
         LOG_INFO(logger, "requesting relay list from: {}, session_id: {}",
                  current.to_string(), current.session_id);
-        std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays, logger);
+        std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays, logger, stats_reporter);
 
         // randomize
         std::ranges::shuffle(relay_list, rng);
@@ -271,7 +277,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
                                                                             known_relays->usable_relays,
                                                                             udp_sockv4->local_endpoint().port()))
             continue;
-        if(co_await establish_connection(relay, udp_sockv4, known_relays, logger)){
+        if(co_await establish_connection(relay, udp_sockv4, known_relays, logger, stats_reporter)){
             LOG_WARNING(logger, "Couldn't connect to relay: {}", relay.to_string());
             continue;
         }
@@ -377,7 +383,8 @@ std::vector<uint8_t> Node::make_request_relay_list_packet(RelayInfo& relay, txn_
 asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& relay,
                                                                  std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                                  std::shared_ptr<RelaysInfoGlb> relays_info_glb,
-                                                                 quill::Logger* logger){
+                                                                 quill::Logger* logger,
+                                                                 std::shared_ptr<network_stats::StatsReporter> stats_reporter){
     std::vector<RelayInfo> result_relays;
     if(relay.session_id == static_cast<session_id_t>(-1) || !udp_sockv4 || !relays_info_glb){
         co_return result_relays;
@@ -392,7 +399,7 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
         crypto::encrypt_layer_cr(relay.sh_cr, request_packet.data() + hdr_size, request_packet.size() - hdr_size);
     }
 
-    auto response = co_await control_send_and_wait_udp(udp_sockv4, request_packet, relay.endpoint, txn_id, relays_info_glb, logger);
+    auto response = co_await control_send_and_wait_udp(udp_sockv4, request_packet, relay.endpoint, txn_id, relays_info_glb, logger, stats_reporter);
 
     if(std::holds_alternative<std::vector<uint8_t>>(response)){
         // client::process_incoming_packet already parsed the raw packet. we just get the response body.
@@ -420,7 +427,8 @@ asio::awaitable<std::vector<RelayInfo>> Node::request_relay_list(RelayInfo& rela
 asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& relay,
                                                             std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                             std::shared_ptr<RelaysInfoGlb> relays_info_glb,
-                                                            quill::Logger* logger){
+                                                            quill::Logger* logger,
+                                                            std::shared_ptr<network_stats::StatsReporter> stats_reporter){
     // fixme: ipv6
     if(relay.endpoint.protocol() == asio::ip::udp::v6())
         co_return CommError(true, "relay.endpoint is of type ipv6");
@@ -434,13 +442,14 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
     crypto::EphemeralDH dh;
     if(!dh.initialized){
         LOG_ERROR(logger, "Failed to initialize ephemeral DH for relay connection");
+        stats_reporter->stats.on_crypto_failure();
         co_return CommError(true, "crypto DH init failed");
     }
 
     const auto packet = make_connection_packet(relay, txn_id, dh.public_key());
 
     LOG_INFO(logger, "Trying to connect via udp, max attempts : {}", UDP_Comms_Settings::max_attempts);
-    auto res = co_await control_send_and_wait_udp(udp_sockv4, packet, relay.endpoint, txn_id, relays_info_glb, logger);
+    auto res = co_await control_send_and_wait_udp(udp_sockv4, packet, relay.endpoint, txn_id, relays_info_glb, logger, stats_reporter);
 
     if(std::holds_alternative<std::vector<uint8_t>>(res)){
         LOG_INFO(logger, "Established connection: {}", relay.to_string());
@@ -455,6 +464,7 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
 
             if(!dh.compute_shared_secret(peer_pubkey, relay.sh_cr)){
                 LOG_ERROR(logger, "Failed to compute shared secret SH_CR with relay");
+                stats_reporter->stats.on_crypto_failure();
                 co_return CommError(true, "shared secret derivation failed");
             }
             LOG_INFO(logger, "Derived shared secret SH_CR with relay successfully");
@@ -472,7 +482,8 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
                                                                      asio::ip::udp::endpoint endpoint,
                                                                      txn_id_t txn_id,
                                                                      std::shared_ptr<RelaysInfoGlb> relays_info_glb,
-                                                                     quill::Logger* logger){
+                                                                     quill::Logger* logger,
+                                                                     std::shared_ptr<network_stats::StatsReporter> stats_reporter){
     auto executor = co_await asio::this_coro::executor;
     auto timeout = UDP_Comms_Settings::start_timeout;
 
@@ -492,6 +503,7 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
     for(size_t attempt = 1; attempt <= UDP_Comms_Settings::max_attempts; attempt++){
         try{
             co_await udp_sockv4->async_send_to(asio::buffer(packet), endpoint, asio::use_awaitable);
+            stats_reporter->stats.on_packet_sent(packet.size());
 
             asio::steady_timer timer(executor, timeout);
 
@@ -506,6 +518,7 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
 
             if(result.index() == 0){
                 timer.cancel();
+                stats_reporter->stats.on_packet_received(std::get<0>(result).size());
                 auto response_packet = std::get<0>(std::move(result));
                 co_return response_packet;
             }
@@ -527,8 +540,9 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
 
 
 void Node::listenv4(ArenaSlot<IncomingCell> packet){
-    if (!packet) {
+    if(!packet){
         LOG_ERROR(logger_, "listenv4 was called with null packet.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -539,6 +553,7 @@ void Node::listenv4(ArenaSlot<IncomingCell> packet){
         (*sender_endpoint_),
         [me=shared_from_this(), pkt = std::move(packet)](const boost::system::error_code& ec, const size_t bytes_received) mutable{
             pkt->bytes_received = bytes_received;
+            me->stats_reporter_->stats.on_packet_received(bytes_received);
             me->loop_listen(std::move(pkt), ec, true);
         }
     );
@@ -546,8 +561,9 @@ void Node::listenv4(ArenaSlot<IncomingCell> packet){
 
 
 void Node::listenv6(ArenaSlot<IncomingCell> packet){
-    if (!packet) {
+    if(!packet){
         LOG_ERROR(logger_, "listenv6 was called with null packet.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -558,6 +574,7 @@ void Node::listenv6(ArenaSlot<IncomingCell> packet){
         (*sender_endpoint_),
         [me=shared_from_this(), pkt = std::move(packet)](const boost::system::error_code& ec, const size_t bytes_received) mutable{
             pkt->bytes_received = bytes_received;
+            me->stats_reporter_->stats.on_packet_received(bytes_received);
             me->loop_listen(std::move(pkt), ec, false);
         }
     );
@@ -588,6 +605,7 @@ void Node::loop_listen(ArenaSlot<IncomingCell> packet, const boost::system::erro
 void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint endpoint) const{
     if(packet->bytes_received < sizeof(RoutingFlag)){
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<1.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 

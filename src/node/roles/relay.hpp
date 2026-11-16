@@ -30,7 +30,8 @@ public:
     Relay(asio::io_context& ioc,
           std::shared_ptr<asio::ip::udp::socket> sockv4,
           std::shared_ptr<asio::ip::udp::socket> sockv6,
-          std::shared_ptr<RelaysInfoGlb>);
+          std::shared_ptr<RelaysInfoGlb> relays_info_glb,
+          const std::shared_ptr<network_stats::StatsReporter>& stats_reporter);
 
 
     ~Relay();
@@ -56,6 +57,7 @@ private:
     RCU_UMap<circuit_id_t, ClientInfo> cid_ci_umap_;
     RCU_UMap<session_id_t, ClientInfo> sid_ci_umap_;
     quill::Logger* logger_{nullptr};
+    std::shared_ptr<network_stats::StatsReporter> stats_reporter_;
 
 
     void handle_control_from_client(session_id_t sid, const uint8_t* data, size_t len,

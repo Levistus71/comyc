@@ -12,8 +12,8 @@ cmake-build-release
 .vscode
 
 
-# logs
-local_testing/logs/
+# local_testing
+/local_testing/
 
 
 # syncthing

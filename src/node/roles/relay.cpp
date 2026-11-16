@@ -11,11 +11,13 @@
 Relay::Relay(asio::io_context& ioc,
              std::shared_ptr<asio::ip::udp::socket> sockv4,
              std::shared_ptr<asio::ip::udp::socket> sockv6,
-             std::shared_ptr<RelaysInfoGlb> known_relays):
+             std::shared_ptr<RelaysInfoGlb> known_relays,
+             const std::shared_ptr<network_stats::StatsReporter>& stats_reporter):
     ioc_(ioc),
     udp_socketv4_(std::move(sockv4)),
     udp_socketv6_(std::move(sockv6)),
-    known_relays_(std::move(known_relays)){
+    known_relays_(std::move(known_relays)),
+    stats_reporter_(stats_reporter){
     logger_ = quill::Frontend::get_logger("relay_logger");
 }
 
@@ -77,6 +79,7 @@ outgoing packet:
 void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asio::ip::udp::endpoint& sender_endpoint){
     if(!parse_upper_packet_from_client(packet)){
         LOG_ERROR(logger_, "Dropping faulty packet, route_packet, size<5.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -92,6 +95,7 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
 
     if(!parse_cid_from_client(packet)){
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, unable to find cid.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -185,6 +189,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
                                        std::array<uint8_t, 32>& sh_cr){
     if(len < CONTROL_HDR_SZ){
         LOG_WARNING(logger_, "Dropping control packet from client: length too small ({})", len);
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -201,6 +206,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
         case ControlMsgType::RELAY_HANDSHAKE_REQ: {
             if(body_len < sizeof(RelayHandshakeReq)){
                 LOG_WARNING(logger_, "RelayHandshakeReq payload too small.");
+                stats_reporter_->stats.on_malformed_packet();
                 return;
             }
             RelayHandshakeReq req{};
@@ -217,6 +223,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             std::memcpy(peer_pubkey.data(), req.public_key, sizeof(peer_pubkey));
             if(!dh.compute_shared_secret(peer_pubkey, sh_cr)){
                 LOG_ERROR(logger_, "Relay failed to compute shared secret SH_CR with client");
+                stats_reporter_->stats.on_malformed_packet();
                 return;
             }
 
@@ -246,6 +253,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
             if(!sock || !sock->is_open()){
                 LOG_ERROR(logger_, "Target socket is not open for endpoint {}", sender_endpoint.address().to_string());
+                stats_reporter_->stats.on_malformed_packet();
                 return;
             }
 
@@ -255,7 +263,8 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             sock->async_send_to(
                 asio::buffer(*send_data),
                 sender_endpoint,
-                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t bytes_xfer){
+                    me->stats_reporter_->stats.on_packet_sent(bytes_xfer);
                     if(ec){
                         LOG_ERROR(me->logger_, "Failed to send RelayHandshakeRes: {}", ec.message());
                     }
@@ -267,6 +276,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
         case ControlMsgType::RELAY_DISCOVERY_REQ: {
             if(body_len < sizeof(RelayListReq)){
                 LOG_WARNING(logger_, "RelayListReq payload too small.");
+                stats_reporter_->stats.on_malformed_packet();
                 return;
             }
             RelayListReq req{};
@@ -307,7 +317,8 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             sock->async_send_to(
                 asio::buffer(*send_data),
                 sender_endpoint,
-                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t bytes_xfer){
+                    me->stats_reporter_->stats.on_packet_sent(bytes_xfer);
                     if(ec){
                         LOG_ERROR(me->logger_, "Failed to send RelayListRes: {}", ec.message());
                     }
@@ -319,6 +330,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
         case ControlMsgType::RELAY_SETUP_EXIT_REQ: {
             if(body_len < sizeof(RelaySetupExitReq)){
                 LOG_WARNING(logger_, "RelaySetupExitReq payload too small.");
+                stats_reporter_->stats.on_malformed_packet();
                 return;
             }
             RelaySetupExitReq req{};
@@ -334,6 +346,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             auto client_info = sid_ci_umap_.get(sid);
             if(client_info == nullptr){
                 LOG_WARNING(logger_, "Client information is nullptr, asked to setup exit. sid: {}", sid);
+                stats_reporter_->stats.on_malformed_packet();
                 return;
             }
             cid_ci_umap_.put_if_absent(req.circuit_id, *client_info);
@@ -352,7 +365,8 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             sock->async_send_to(
                 asio::buffer(*send_data),
                 sender_endpoint,
-                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t){
+                [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t bytes_xfer){
+                    me->stats_reporter_->stats.on_packet_sent(bytes_xfer);
                     if(ec){
                         LOG_ERROR(me->logger_, "Failed to send RelaySetupExitRes: {}", ec.message());
                     }
@@ -363,6 +377,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
         default:
             LOG_WARNING(logger_, "Unhandled client control message: {}", static_cast<int>(chdr.msg_type));
+            stats_reporter_->stats.on_malformed_packet();
             break;
     }
 }
@@ -410,6 +425,7 @@ void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
     if(exit_info == nullptr){
         LOG_WARNING(logger_, "Dropping invalid packet, no session_id map found for sid: {}, cid:{}", packet->sid, packet->cid);
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
@@ -437,6 +453,7 @@ void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
         // packet in lambda to make sure it doesn't get destroyed.
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
         [me=shared_from_this(), keep_alive = std::move(packet)](const boost::system::error_code& ec, size_t bytes_xfer){
+            me->stats_reporter_->stats.on_packet_forwarded(bytes_xfer);
             if(ec){
                 LOG_ERROR(me->logger_, "[Relay] Exit send failed: {}", ec.message());
                 return;
@@ -479,12 +496,14 @@ outgoing packet:
 void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
     if(!parse_packet_from_exit(packet)){
         LOG_WARNING(logger_, "Dropping faulty packet, route_packet, size<5.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
 
     std::shared_ptr<ClientInfo> client_info = cid_ci_umap_.get(packet->cid);
     if(client_info == nullptr){
         LOG_WARNING(logger_, "Dropping invalid packet, no circuit_id found.");
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
     packet->sid = client_info->session_id;
@@ -518,6 +537,7 @@ void Relay::forward_to_client(ArenaSlot<IncomingCell> packet){
         // ? compiler shouldn't theoretically optimize this packet out of the capture list.
         [me=shared_from_this(), keep_alive = std::move(packet)]
         (const boost::system::error_code& ec, size_t bytes_xfer){
+            me->stats_reporter_->stats.on_packet_forwarded(bytes_xfer);
             if(ec){
                 LOG_ERROR(me->logger_, "Exit send failed: {}", ec.message());
                 return;

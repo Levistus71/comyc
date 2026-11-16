@@ -56,7 +56,8 @@ Client::Client(asio::io_context& ioc,
                std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
                std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
                std::shared_ptr<RelaysInfoGlb> known_relays,
-               asio::ip::udp::endpoint exit_endpoint):
+               asio::ip::udp::endpoint exit_endpoint,
+               const std::shared_ptr<network_stats::StatsReporter>& stats_reporter):
     ioc_(ioc),
     udp_socketv4_(std::move(udp_socketv4)),
     udp_socketv6_(std::move(udp_socketv6)),
@@ -66,7 +67,8 @@ Client::Client(asio::io_context& ioc,
     raw_packet_pool_(Settings::ARENA_SLOTS, "client_logger"),
     utun_strand_(asio::make_strand(ioc_)),
     utun_stream_(utun_strand_),
-    utun_("client_logger"){
+    utun_("client_logger"),
+    stats_reporter_(stats_reporter){
     logger_ = quill::Frontend::get_logger("client_logger");
     default_vpn_v4_ = RandomGen::gen_address_v4();
     do{
@@ -177,6 +179,7 @@ void Client::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
         [me=shared_from_this(), rp = std::move(raw_packet)](const boost::system::error_code& ec, std::size_t bytes_xfer) mutable{
             rp->bytes_received = bytes_xfer;
             me->loop_utun(std::move(rp), ec);
+            me->stats_reporter_->stats.on_utun_received(bytes_xfer);
         }
     );
 }
@@ -185,6 +188,7 @@ void Client::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
 void Client::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::error_code const& ec){
     if(ec){
         LOG_ERROR(logger_, "Raw packet read failed: {}", ec.message());
+        stats_reporter_->stats.on_utun_drop();
         return;
     }
 
@@ -202,6 +206,7 @@ void Client::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::err
 void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     if(!raw_packet->parse_packet()){
         LOG_WARNING(logger_, "Dropping faulty packet from utun.");
+        stats_reporter_->stats.on_utun_drop();
         return;
     }
 
@@ -288,6 +293,7 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
         // optimize: no shared_ptrs for 1. packet, 2. headers
         [me=shared_from_this(), outgoing_bytes, keep_alive1 = std::move(raw_packet), keep_alive2 = headers]
         (const boost::system::error_code& ec, std::size_t bytes_xfer){
+            me->stats_reporter_->stats.on_packet_sent(bytes_xfer);
             if(ec){
                 LOG_ERROR(me->logger_, "[TUN Worker] Send failed: {}", ec.message());
                 return;
@@ -507,7 +513,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
             LOG_INFO(logger_, "Trying to setup exit info with relay : {}", rinfo->to_string());
 
-            auto res = co_await Node::control_send_and_wait_udp(sock, setup_packet, rinfo->endpoint, txn_id, known_relays_, logger_);
+            auto res = co_await Node::control_send_and_wait_udp(sock, setup_packet, rinfo->endpoint, txn_id, known_relays_, logger_, stats_reporter_);
 
             if(std::holds_alternative<std::vector<uint8_t>>(res)){
                 auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
@@ -592,7 +598,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
     auto sock = (primary_relay->endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
 
-    auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_, logger_);
+    auto res = co_await Node::control_send_and_wait_udp(sock, create_packet, primary_relay->endpoint, txn_id, known_relays_, logger_, stats_reporter_);
 
     crypto::Key256 sh_ce{};
 
@@ -659,6 +665,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         LOG_INFO(logger_, "Default circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
                  exit_start_seq, our_start_seq, final_ci->circuit_id);
     }
+    stats_reporter_->stats.on_circuit_opened();
     co_return true;
 }
 
@@ -775,6 +782,7 @@ void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
     auto circuit_info = sid_ci_umap_.get(packet->sid);
     if(!circuit_info){
         LOG_WARNING(logger_, "Recieved incoming packet with unknown sid: {}, cid: {}", packet->sid, packet->cid);
+        stats_reporter_->stats.on_malformed_packet();
         return;
     }
     circuit_info->touch(shared_from_this());
@@ -789,6 +797,7 @@ void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
         )
     ){
         LOG_WARNING(logger_, "Reorder buffer insert failed for seq_id {}", packet->seq_id);
+        stats_reporter_->stats.on_utun_drop();
     }
 }
 
@@ -830,11 +839,12 @@ void Client::do_write_utun(sequence_id_t seq_id){
     // not compatible
 #endif
 
-    auto lmb = [me = shared_from_this(), seq_id](const boost::system::error_code& ec, std::size_t /*bytes_transferred*/){
+    auto lmb = [me = shared_from_this(), seq_id](const boost::system::error_code& ec, std::size_t bytes_xfer){
         if(ec){
             LOG_ERROR(me->logger_, "utun write error (seq {}): {}", seq_id, ec.message());
+            me->stats_reporter_->stats.on_utun_drop();
         }
-
+        me->stats_reporter_->stats.on_utun_sent(bytes_xfer);
         // stranded
         me->utun_write_queue_.pop_front();
         me->do_write_utun(seq_id);

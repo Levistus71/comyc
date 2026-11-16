@@ -7,3 +7,6 @@
 -> relays connection all at once in background (IMPORTANT)
 
 -> lockless reorder buffer
+
+
+-> MTU size

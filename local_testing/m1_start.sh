@@ -3,7 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-cmake --build ../build
+
 mkdir -p logs
 
 SESSION="relays"
@@ -26,15 +26,15 @@ echo ""
 
 # Pane 0: Relay 1 (port 7001)
 tmux new-session -d -s "$SESSION" -n "mac2" \
-    "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../build/node -r relay -p 7001 -b 192.168.0.101 --bootstrap-port 6969 -c -l ./logs/relay-1_logs.txt; read"
+    "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../cmake-build-release/comyc -r relay -p 7001 -b 192.168.1.205 --bootstrap-port 6969 -c -l ./logs/relay-1_logs.txt; read"
 
 # Pane 1: Relay 2 (port 7002)
 tmux split-window -h -t "$SESSION:0" \
-    "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../build/node -r relay -p 7002 -b 192.168.0.101 --bootstrap-port 6969 -c -l ./logs/relay-2_logs.txt; read"
+    "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../cmake-build-release/comyc -r relay -p 7002 -b 192.168.1.205 --bootstrap-port 6969 -c -l ./logs/relay-2_logs.txt; read"
 
 # Pane 2: Exit node (port 8001)
 tmux split-window -v -t "$SESSION:0.0" \
-    "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../build/node -r exit -p 8001 -l ./logs/exit_logs.txt -c; read"
+    "echo '$SUDO_PASS' | sudo -S QUILL_LOG_LEVEL=debug ../cmake-build-release/comyc -r exit -p 8001 -l ./logs/exit_logs.txt -c; read"
 
 unset SUDO_PASS
 
