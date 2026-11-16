@@ -164,9 +164,16 @@ inline void Client::start_listening_utun(){
 
 
 void Client::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
+    if (!raw_packet) {
+        LOG_ERROR(logger_, "read_packet_utun called with null raw_packet.");
+        return;
+    }
+
+    auto recv_buf = asio::buffer(raw_packet->payload);
+
     // todo: check if this reads whole packet. if it doesn't, how do we make it read the whole packet?
     utun_stream_.async_read_some(
-        asio::buffer(raw_packet->payload),
+        recv_buf,
         [me=shared_from_this(), rp = std::move(raw_packet)](const boost::system::error_code& ec, std::size_t bytes_xfer) mutable{
             rp->bytes_received = bytes_xfer;
             me->loop_utun(std::move(rp), ec);

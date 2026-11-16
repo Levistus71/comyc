@@ -632,7 +632,7 @@ int Utun::get_fd() const{
     rt.rt_flags = RTF_UP | RTF_GATEWAY;
     const unsigned long cmd = enable ? SIOCADDRT : SIOCDELRT;
     const bool ret = (::ioctl(sock, cmd, &rt) >= 0);
-    if(ret){
+    if(!ret){
         LOG_ERROR(logger, "[TUN] modify_route_v4 write failed: {} (errno={})", std::strerror(errno), errno);
     }
     ::close(sock);
@@ -717,7 +717,7 @@ int Utun::get_fd() const{
 
     const unsigned long cmd = enable ? SIOCADDRT : SIOCDELRT;
     const bool ret = (::ioctl(sock, cmd, &rt6) >= 0);
-    if(ret){
+    if(!ret){
         LOG_ERROR(logger, "[TUN] modify_route_v4 write failed: {} (errno={})", std::strerror(errno), errno);
     }
     ::close(sock);
