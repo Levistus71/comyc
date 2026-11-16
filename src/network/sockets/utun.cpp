@@ -905,7 +905,7 @@ std::optional<asio::ip::address_v6> Utun::get_default_gateway_v6(){
 
 
 namespace{
-bool is_local_or_loopback(const asio::ip::address& addr){
+[[maybe_unused]] bool is_local_or_loopback(const asio::ip::address& addr){
     if(addr.is_loopback() || addr.is_multicast() || addr.is_unspecified()){
         return true;
     }

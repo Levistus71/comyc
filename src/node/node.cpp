@@ -219,7 +219,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
             continue;
 
         if(!current.is_connected()){
-            LOG_INFO(logger, "trying to establish connection new relay");
+            LOG_INFO(logger, "Trying to establish connection new relay");
             if(co_await establish_connection(current, udp_sockv4, known_relays, logger))
                 continue;
             auto it = known_relays->all_relays.find(current);
@@ -242,8 +242,8 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
         client->update_relays();
 
 
-        LOG_INFO(logger, "requesting relay list from: {}:{}, session_id: {}",
-                 current.endpoint.address().to_string(), current.endpoint.port(), current.session_id);
+        LOG_INFO(logger, "requesting relay list from: {}, session_id: {}",
+                 current.to_string(), current.session_id);
         std::vector<RelayInfo> relay_list = co_await request_relay_list(current, udp_sockv4, known_relays, logger);
 
         // randomize
@@ -272,7 +272,7 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
                                                                             udp_sockv4->local_endpoint().port()))
             continue;
         if(co_await establish_connection(relay, udp_sockv4, known_relays, logger)){
-            LOG_INFO(logger, "Couldn't connect to relay: {}:{}", relay.endpoint.address().to_string(), relay.endpoint.port());
+            LOG_WARNING(logger, "Couldn't connect to relay: {}", relay.to_string());
             continue;
         }
         known_relays->usable_relays.insert(relay);
@@ -281,12 +281,12 @@ asio::awaitable<Node::CommError> Node::populate_relays(std::shared_ptr<RelaysInf
     // LOG
     std::string known_str;
     for(const auto& relay: known_relays->all_relays){
-        known_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", relay.session_id, relay.endpoint.address().to_string(), relay.endpoint.port());
+        known_str += fmt::format("\n  - sid: {}, endpoint: {}", relay.session_id, relay.to_string());
     }
 
     std::string usable_str;
     for(const auto& relay: known_relays->usable_relays){
-        usable_str += fmt::format("\n  - sid: {}, endpoint: {}:{}", relay.session_id, relay.endpoint.address().to_string(), relay.endpoint.port());
+        usable_str += fmt::format("\n  - sid: {}, endpoint: {}", relay.session_id, relay.to_string());
     }
 
     client->update_relays();
@@ -428,8 +428,8 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
     relay.session_id = RandomGen::gen_session_id();
     const txn_id_t txn_id = RandomGen::gen_txn_id();
 
-    LOG_INFO(logger, "starting establishing connection to {}:{}, session_id: {}",
-             relay.endpoint.address().to_string(), relay.endpoint.port(), relay.session_id);
+    LOG_INFO(logger, "Starting establishing connection to {}, session_id: {}",
+             relay.to_string(), relay.session_id);
 
     crypto::EphemeralDH dh;
     if(!dh.initialized){
@@ -439,11 +439,11 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
 
     const auto packet = make_connection_packet(relay, txn_id, dh.public_key());
 
-    LOG_INFO(logger, "trying to connect via udp, max attempts : {}", UDP_Comms_Settings::max_attempts);
+    LOG_INFO(logger, "Trying to connect via udp, max attempts : {}", UDP_Comms_Settings::max_attempts);
     auto res = co_await control_send_and_wait_udp(udp_sockv4, packet, relay.endpoint, txn_id, relays_info_glb, logger);
 
     if(std::holds_alternative<std::vector<uint8_t>>(res)){
-        LOG_INFO(logger, "established connection");
+        LOG_INFO(logger, "Established connection: {}", relay.to_string());
         auto response = std::get<std::vector<uint8_t>>(std::move(res));
         // client::process_incoming_packet already parsed the raw packet. we just get the response body.
         if(response.size() >= sizeof(RelayHandshakeRes)){
@@ -462,7 +462,7 @@ asio::awaitable<Node::CommError> Node::establish_connection(const RelayInfo& rel
         co_return false;
     }
 
-    LOG_INFO(logger, "establish connection failed.");
+    LOG_INFO(logger, "Establish connection failed.");
     co_return std::get<CommError>(res);
 }
 
@@ -492,7 +492,6 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
     for(size_t attempt = 1; attempt <= UDP_Comms_Settings::max_attempts; attempt++){
         try{
             co_await udp_sockv4->async_send_to(asio::buffer(packet), endpoint, asio::use_awaitable);
-            LOG_INFO(logger, "sent packet number {}, txn_id: {}, waiting for response", attempt, txn_id%10000);
 
             asio::steady_timer timer(executor, timeout);
 
@@ -506,13 +505,11 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
             );
 
             if(result.index() == 0){
-                LOG_INFO(logger, "received response from packet number {}, txn_id {}", attempt, txn_id%10000);
                 timer.cancel();
                 auto response_packet = std::get<0>(std::move(result));
                 co_return response_packet;
             }
 
-            LOG_INFO(logger, "timer's up,  didn't receive response, packet number {}, txn_id {}", attempt, txn_id%10000);
             auto& mut = relays_info_glb->registry_mutex_;
             std::lock_guard<std::mutex> lock(mut);
             relays_info_glb->pending_requests_.erase(txn_id);
@@ -524,7 +521,7 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
         timeout *= 2;
     }
 
-    LOG_INFO(logger, "couldn't receive response, max attempts reached.");
+    LOG_INFO(logger, "Couldn't receive response, max attempts reached.");
     co_return CommError(true, "didn't receive response, max attempts reached");
 }
 
@@ -599,39 +596,32 @@ void Node::route_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint 
     std::memcpy(&raw_flag, packet->payload.data(), sizeof(FlagType));
     packet->route_flag = static_cast<RoutingFlag>(raw_flag);
 
-    LOG_INFO(logger_, "Received packet from outside, endpoint: {}:{}", endpoint.address().to_string(), endpoint.port());
-
     switch(packet->route_flag){
         case RoutingFlag::CLIENT_TO_RELAY: {
             if(relay_){
-                LOG_INFO(logger_, "processing packet from client, routing to relay.");
                 relay_->process_packet_from_client(std::move(packet), endpoint);
             }
             return;
         }
         case RoutingFlag::EXIT_TO_RELAY: {
             if(relay_){
-                LOG_INFO(logger_, "processing packet from exit, routing to relay.");
                 relay_->process_packet_from_exit(std::move(packet));
             }
             return;
         }
         case RoutingFlag::RELAY_TO_CLIENT: {
             if(client_){
-                LOG_INFO(logger_, "processing packet from relay, routing to client.");
                 client_->process_incoming_packet(std::move(packet));
             }
             return;
         }
         case RoutingFlag::RELAY_TO_EXIT: {
             if(exit_){
-                LOG_INFO(logger_, "processing packet from relay, routing to exit.");
                 exit_->process_incoming_packet(std::move(packet), endpoint);
             }
             return;
         }
         default: {
-            LOG_WARNING(logger_, "Dropping faulty packet, invalid routing flag.");
             return;
         }
     }

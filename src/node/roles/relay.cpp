@@ -89,19 +89,13 @@ void Relay::process_packet_from_client(ArenaSlot<IncomingCell> packet, const asi
         }
     }
 
-    if(client_info)
-        LOG_DEBUG(logger_, "found sid in sid_ci_umap_");
-    else
-        LOG_DEBUG(logger_, "did not find sid in sid_ci_umap_");
-
 
     if(!parse_cid_from_client(packet)){
-        LOG_ERROR(logger_, "Dropping faulty packet, route_packet, unable to find cid.");
+        LOG_WARNING(logger_, "Dropping faulty packet, route_packet, unable to find cid.");
         return;
     }
 
     if(packet->control_packet){
-        LOG_DEBUG(logger_, "control packet, packet_cid : {} | -1: {}", packet->cid, static_cast<circuit_id_t>(-1));
         const uint8_t* control_data = packet->payload.data() + packet->start_offset + TRANSIT_HDR_SZ;
         const size_t control_len = packet->payload_bytes - TRANSIT_HDR_SZ;
         if(client_info){
@@ -190,7 +184,7 @@ static std::vector<uint8_t> make_relay_list_rep_packet(const session_id_t sid, c
 void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* data, size_t len, const asio::ip::udp::endpoint& sender_endpoint,
                                        std::array<uint8_t, 32>& sh_cr){
     if(len < CONTROL_HDR_SZ){
-        LOG_ERROR(logger_, "Dropping control packet from client: length too small ({})", len);
+        LOG_WARNING(logger_, "Dropping control packet from client: length too small ({})", len);
         return;
     }
 
@@ -206,7 +200,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
     switch(chdr.msg_type){
         case ControlMsgType::RELAY_HANDSHAKE_REQ: {
             if(body_len < sizeof(RelayHandshakeReq)){
-                LOG_ERROR(logger_, "RelayHandshakeReq payload too small.");
+                LOG_WARNING(logger_, "RelayHandshakeReq payload too small.");
                 return;
             }
             RelayHandshakeReq req{};
@@ -272,7 +266,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
         case ControlMsgType::RELAY_DISCOVERY_REQ: {
             if(body_len < sizeof(RelayListReq)){
-                LOG_ERROR(logger_, "RelayListReq payload too small.");
+                LOG_WARNING(logger_, "RelayListReq payload too small.");
                 return;
             }
             RelayListReq req{};
@@ -324,7 +318,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
 
         case ControlMsgType::RELAY_SETUP_EXIT_REQ: {
             if(body_len < sizeof(RelaySetupExitReq)){
-                LOG_ERROR(logger_, "RelaySetupExitReq payload too small.");
+                LOG_WARNING(logger_, "RelaySetupExitReq payload too small.");
                 return;
             }
             RelaySetupExitReq req{};
@@ -339,7 +333,7 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             sid_ei_umap_.put_if_absent(sid, ExitInfo{.endpoint = exit_ep});
             auto client_info = sid_ci_umap_.get(sid);
             if(client_info == nullptr){
-                LOG_ERROR(logger_, "Client information is nullptr, asked to setup exit. sid: {}", sid);
+                LOG_WARNING(logger_, "Client information is nullptr, asked to setup exit. sid: {}", sid);
                 return;
             }
             cid_ci_umap_.put_if_absent(req.circuit_id, *client_info);
@@ -415,7 +409,7 @@ void Relay::process_packet_from_exit(ArenaSlot<IncomingCell> packet){
 void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
     std::shared_ptr<ExitInfo> exit_info = sid_ei_umap_.get(packet->sid);
     if(exit_info == nullptr){
-        LOG_ERROR(logger_, "Dropping invalid packet, no session_id map found for sid: {}, cid:{}", packet->sid, packet->cid);
+        LOG_WARNING(logger_, "Dropping invalid packet, no session_id map found for sid: {}, cid:{}", packet->sid, packet->cid);
         return;
     }
 
@@ -437,7 +431,6 @@ void Relay::forward_to_exit(ArenaSlot<IncomingCell> packet){
                                                             ? udp_socketv4_
                                                             : udp_socketv6_;
 
-    LOG_INFO(logger_, "Forwarding packet to exit, endpoint: {}:{}", exit_info->endpoint.address().to_string(), exit_info->endpoint.port());
     sock->async_send_to(
         outgoing,
         exit_info->endpoint,

@@ -4,7 +4,6 @@
 #include <cstring>
 #include <initializer_list>
 #include <openssl/evp.h>
-#include <openssl/sha.h>
 #include <openssl/rand.h>
 #include <openssl/crypto.h>
 
@@ -82,9 +81,11 @@ inline bool derive_x25519_shared_secret(const PrivKey256& our_private_key,
     if(ctx && EVP_PKEY_derive_init(ctx) > 0 &&
        EVP_PKEY_derive_set_peer(ctx, peer_pkey) > 0){
         size_t secret_len = raw_secret.size();
+        unsigned int digest_len = 0;
         if(EVP_PKEY_derive(ctx, raw_secret.data(), &secret_len) > 0 &&
-           secret_len == raw_secret.size()){
-            SHA256(raw_secret.data(), raw_secret.size(), shared_secret.data());
+           secret_len == raw_secret.size() &&
+           EVP_Digest(raw_secret.data(), raw_secret.size(),
+                      shared_secret.data(), &digest_len, EVP_sha256(), nullptr) == 1){
             success = true;
         }
     }
@@ -101,12 +102,22 @@ inline bool derive_x25519_shared_secret(const PrivKey256& our_private_key,
 
 // derive a 16-byte IV from the derived key
 inline IV128 derive_iv_from_key(const Key256& key){
-    uint8_t digest[SHA256_DIGEST_LENGTH];
-    SHA256_CTX sha;
-    SHA256_Init(&sha);
-    SHA256_Update(&sha, "ctr-iv-v1", 9);
-    SHA256_Update(&sha, key.data(), key.size());
-    SHA256_Final(digest, &sha);
+    uint8_t digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_len = 0;
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if(!ctx){
+        throw std::runtime_error("Failed to create EVP_MD_CTX");
+    }
+
+    if(EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+       EVP_DigestUpdate(ctx, "ctr-iv-v1", 9) != 1 ||
+       EVP_DigestUpdate(ctx, key.data(), key.size()) != 1 ||
+       EVP_DigestFinal_ex(ctx, digest, &digest_len) != 1){
+        EVP_MD_CTX_free(ctx);
+        throw std::runtime_error("SHA-256 digest computation failed");
+    }
+    EVP_MD_CTX_free(ctx);
 
     IV128 iv{};
     std::memcpy(iv.data(), digest, IV_SIZE);

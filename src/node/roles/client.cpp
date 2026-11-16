@@ -109,10 +109,10 @@ void Client::update_relays(){
             std::lock_guard<std::mutex> lock(known_relays_->registry_mutex_);
             for(auto& rinfo: known_relays_->usable_relays){
                 if(!utun_.add_del_route(true, rinfo.endpoint.address(), prefix_v4)){
-                    LOG_ERROR(logger_, "Failed to add relay {} to utun route, maybe local endpoint.", rinfo.endpoint.address().to_string());
+                    LOG_ERROR(logger_, "Failed to add relay {} to utun route, maybe local endpoint.", rinfo.to_string());
                 }
                 else{
-                    LOG_INFO(logger_, "Added relay {} to utun routes.", rinfo.endpoint.address().to_string());
+                    LOG_INFO(logger_, "Added relay {} to utun routes.", rinfo.to_string());
                 }
             }
         }
@@ -164,7 +164,7 @@ inline void Client::start_listening_utun(){
 
 
 void Client::read_packet_utun(ArenaSlot<utun::RawPacket> raw_packet){
-    if (!raw_packet) {
+    if(!raw_packet){
         LOG_ERROR(logger_, "read_packet_utun called with null raw_packet.");
         return;
     }
@@ -201,7 +201,7 @@ void Client::loop_utun(ArenaSlot<utun::RawPacket> raw_packet, boost::system::err
 // single_threaded: parse packet, query circuit info, increment seq_id, asio::post continue_process_packet and return
 void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     if(!raw_packet->parse_packet()){
-        LOG_ERROR(logger_, "Dropping faulty packet from utun.");
+        LOG_WARNING(logger_, "Dropping faulty packet from utun.");
         return;
     }
 
@@ -215,7 +215,6 @@ void Client::process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet){
     auto ci = nt_ci_umap_.get(nt);
     if(ci == nullptr) [[unlikely]] {
         ci = track_new_nt(nt, raw_packet);
-        LOG_DEBUG(logger_, "new nt");
         if(ci == nullptr)
             return;
     }
@@ -279,10 +278,6 @@ void Client::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, 
     std::shared_ptr<asio::ip::udp::socket> sock = (relay->endpoint.protocol() == asio::ip::udp::v4())
                                                       ? udp_socketv4_
                                                       : udp_socketv6_;
-
-    LOG_DEBUG(logger_, "sending packet through circuit_id: {}, sequence_number: {}", ci->circuit_id, seq_id);
-    LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-              ci->sh_ce[0], ci->sh_ce[1], ci->sh_ce[2], ci->sh_ce[3], ci->sh_ce[4], ci->sh_ce[5], ci->sh_ce[6], ci->sh_ce[7]);
 
     // @formatter:off
     sock->async_send_to(
@@ -534,7 +529,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
                 selected_relays.push_back(rinfo);
             }
             else{
-                LOG_ERROR(logger_, "Couldn't setup relay for exit : {}", std::get<Node::CommError>(res).what());
+                LOG_WARNING(logger_, "Couldn't setup relay for exit : {}", std::get<Node::CommError>(res).what());
                 continue;
             }
         }
@@ -543,9 +538,9 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
             break;
     }
     if(added_relays < Settings::DEFAULT_NUM_ENTRY_RELAYS){
-        LOG_INFO(logger_, "Couldn't make new circuit, num of relays accepted : {} out of required {}",
-                 added_relays,
-                 Settings::DEFAULT_NUM_ENTRY_RELAYS
+        LOG_WARNING(logger_, "Couldn't make new circuit, num of relays accepted : {} out of required {}. aborting.",
+                    added_relays,
+                    Settings::DEFAULT_NUM_ENTRY_RELAYS
         );
         co_return false;
     }
@@ -605,7 +600,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
         // process_incoming_packet already parsed packet
         if(response_vec.size() < sizeof(ExitHandshakeRes)){
-            LOG_INFO(logger_, "Couldn't connect to exit : received response size too small.");
+            LOG_WARNING(logger_, "Couldn't connect to exit : received response size too small.");
             co_return false;
         }
 
@@ -613,12 +608,12 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         std::memcpy(&response, response_vec.data(), sizeof(ExitHandshakeRes));
 
         if(response.status_code){
-            LOG_INFO(logger_, "Couldn't connect to exit : status : {}", response.status_code);
+            LOG_WARNING(logger_, "Couldn't connect to exit : status : {}", response.status_code);
             co_return false;
         }
 
         if(response.confirmed_cid != assigned_cid){
-            LOG_INFO(logger_, "Couldn't connect to exit : received unexpected confirmed_cid.");
+            LOG_WARNING(logger_, "Couldn't connect to exit : received unexpected confirmed_cid.");
             co_return false;
         }
 
@@ -628,15 +623,12 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
             LOG_ERROR(logger_, "Failed to compute shared secret SH_CE with exit");
             co_return false;
         }
-        LOG_INFO(logger_, "Derived shared secret SH_CE with exit successfully");
 
         exit_start_seq = response.start_seq_exit;
         LOG_INFO(logger_, "Setup connection for exit.");
-        LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                  sh_ce[0], sh_ce[1], sh_ce[2], sh_ce[3], sh_ce[4], sh_ce[5], sh_ce[6], sh_ce[7]);
     }
     else{
-        LOG_ERROR(logger_, "Couldn't connect to exit : {}", std::get<Node::CommError>(res).what());
+        LOG_WARNING(logger_, "Couldn't connect to exit : {}", std::get<Node::CommError>(res).what());
         co_return false;
     }
 
@@ -652,7 +644,6 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
 
     for(const auto& rinfo: selected_relays){
         sid_ci_umap_.put(rinfo->session_id, final_ci);
-        LOG_INFO(logger_, "Put sid: {} into sid_ci_umap_ for ci: {}", rinfo->session_id, assigned_cid);
     }
 
     // update nt_ci_umap_. new packets should use the new ci from now
@@ -662,15 +653,11 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         nt_ci_umap_.put(nt.value(), final_ci);
         LOG_INFO(logger_, "New circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
                  exit_start_seq, our_start_seq, final_ci->circuit_id);
-        LOG_DEBUG(logger_, "New circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
-                  exit_start_seq, our_start_seq, final_ci->circuit_id);
     }
     else{
         default_ci_ = final_ci;
         LOG_INFO(logger_, "Default circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
                  exit_start_seq, our_start_seq, final_ci->circuit_id);
-        LOG_DEBUG(logger_, "Default circuit successfully setup. exit_start_seq: {}, client_start_seq: {}, cid: {}",
-                  exit_start_seq, our_start_seq, final_ci->circuit_id);
     }
     co_return true;
 }
@@ -715,17 +702,8 @@ incoming packet:
     // decrypt using sh_cr
     auto relay_info = sid_ri_umap_.get(packet->sid);
     if(relay_info){
-        LOG_DEBUG(logger_, "decrypting...");
         size_t outer_cipher_len = packet->bytes_received - (sizeof(RoutingFlag) + sizeof(session_id_t));
         crypto::decrypt_layer_cr(relay_info->sh_cr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), outer_cipher_len);
-    }
-    else{
-        if(packet->sid == static_cast<session_id_t>(-1))
-            LOG_DEBUG(logger_, "did not decrypt, control message with sid = -1");
-        else{
-            LOG_DEBUG(logger_, "sid: {}, did not find in sid_ri_umap_", packet->sid);
-            // return false;
-        }
     }
 
     TransitHeader thdr{};
@@ -733,13 +711,11 @@ incoming packet:
     packet->cid = thdr.circuit_id;
 
     if(packet->cid == static_cast<circuit_id_t>(-1) || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)){
-        LOG_DEBUG(logger_, "here.");
         packet->start_offset = min_hdr_sz;
         packet->payload_bytes = packet->bytes_received - min_hdr_sz;
         packet->control_packet = true;
         return true;
     }
-    LOG_DEBUG(logger_, "not control message.");
 
     // decrypt using sh_ce
     auto ci = sid_ci_umap_.get(packet->sid);
@@ -763,7 +739,7 @@ incoming packet:
 
     if(packet->payload_bytes > 0){
         const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
-        packet->ip_version_macos = htonl((ip_ver == 6) ? AF_INET6 : AF_INET);   // those who know :skull:,
+        packet->ip_version_macos = htonl((ip_ver == 6) ? AF_INET6 : AF_INET); // those who know :skull:,
         // fucking htonl
     }
     else{
@@ -777,7 +753,7 @@ incoming packet:
 void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) const{
     constexpr size_t header_len = sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ;
     if(packet->bytes_received < header_len + CONTROL_HDR_SZ){
-        LOG_ERROR(logger_, "Dropping control packet from relay: size too small ({})", packet->bytes_received);
+        LOG_WARNING(logger_, "Dropping control packet from relay: size too small ({})", packet->bytes_received);
         return;
     }
 
@@ -812,7 +788,7 @@ void Client::insert_into_rob(ArenaSlot<IncomingCell> packet){
             }
         )
     ){
-        LOG_ERROR(logger_, "Reorder buffer insert failed for seq_id {}", packet->seq_id);
+        LOG_WARNING(logger_, "Reorder buffer insert failed for seq_id {}", packet->seq_id);
     }
 }
 
@@ -858,13 +834,12 @@ void Client::do_write_utun(sequence_id_t seq_id){
         if(ec){
             LOG_ERROR(me->logger_, "utun write error (seq {}): {}", seq_id, ec.message());
         }
-        LOG_DEBUG(me->logger_, "wrote to utun.");
 
         // stranded
         me->utun_write_queue_.pop_front();
         me->do_write_utun(seq_id);
     };
-    utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_,lmb));
+    utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_, lmb));
 }
 
 

@@ -66,11 +66,9 @@ public:
     [[nodiscard]] bool insert_try_drain(seq_t seq, T&& item, Callback&& handler){
         std::unique_lock<std::mutex> lock(mtx_);
         if(!insert_locked(seq, std::move(item))){
-            log_error("insert failed.");
             return false;
         }
         try_drain_locked(std::forward<Callback>(handler));
-        log_debug("try_drain called successfully.");
         return true;
     }
 
@@ -114,7 +112,8 @@ private:
     [[nodiscard]] bool insert_locked(seq_t seq, T&& item){
         auto diff = static_cast<std::make_signed_t<seq_t>>(seq - head_);
         if(diff < 0 || static_cast<size_t>(diff) >= capacity_){
-            log_error("Couldn't insert: diff: {}, capacity: {}, head: {}, seq: {}", diff, capacity_, head_, seq);
+            log_debug("Couldn't insert: diff: {}, capacity: {}, head: {}, seq: {}", diff, capacity_, head_, seq);
+            log_warn("Couldn't insert, (mostly) buffer full.");
             return false;
         }
 
@@ -127,7 +126,6 @@ private:
         update_rtt_estimator_locked();
         buffer_[index] = std::move(item);
 
-        log_debug("Inserted into buffer successfully.");
         return true;
     }
 
@@ -136,7 +134,6 @@ private:
     void try_drain_locked(Callback&& handler){
         // drain all "ready" packets
         while(buffer_[head_ % capacity_].has_value()){
-            log_debug("draining packet");
             cancel_timer_locked();
 
             size_t index = head_ % capacity_;
@@ -145,36 +142,25 @@ private:
             handler(head_++, std::move(slot));
         }
 
-        log_debug("head not ready");
-
         // check for further packets
         size_t ahead_count = count_buffered_ahead_locked();
         if(ahead_count == 0){
             cancel_timer_locked();
-            log_debug("no more active packets.");
             return; // buffer is clean
         }
-
-        log_debug("active packet size: {}", ahead_count);
 
         // fast-retransmit trigger:
         // if 3 or more packets are buffered ahead of head_, TCP will generate 3 DupACKs anyway
         // skip head_ to trigger fast retransmit without waiting
         if(ahead_count >= Settings::DUPACK_THRESHOLD){
-            log_debug("fast-transmit trying.");
             cancel_timer_locked();
-            log_debug("skipping head and draining.");
             skip_missing_head_and_drain_locked(std::forward<Callback>(handler));
             return;
         }
 
         // start timer
         if(!timer_active_){
-            log_debug("starting timer.");
             start_rto_bounded_timer_locked(std::forward<Callback>(handler));
-        }
-        else{
-            log_debug("timer already active.");
         }
     }
 
@@ -182,7 +168,6 @@ private:
     void cancel_timer_locked(){
         ++timer_generation_;
         if(timer_active_){
-            log_debug("timer cancelled.");
             timer_.cancel();
             timer_active_ = false;
         }
@@ -234,7 +219,6 @@ private:
     template<typename Callback>
     void skip_missing_head_and_drain_locked(Callback&& handler){
         if(count_buffered_ahead_locked() == 0){
-            log_debug("skip_missing_head_and_drain aborted: buffer is empty.");
             return;
         }
 
@@ -244,15 +228,12 @@ private:
             skipped++;
         }
 
-        log_debug("skipped head, head_: {}, skipped: {}", head_, skipped);
-
         try_drain_locked(std::forward<Callback>(handler));
     }
 
 
     template<typename Callback>
     void start_rto_bounded_timer_locked(Callback handler){
-        log_debug("starting timer...");
         timer_active_ = true;
         const uint64_t gen = ++timer_generation_;
         timer_.expires_after(current_wait_limit_);
@@ -262,11 +243,9 @@ private:
                 handler = std::move(handler)](const boost::system::error_code& ec) mutable{
                 std::unique_lock<std::mutex> lock(self->mtx_);
                 if(ec || !self->timer_active_ || self->timer_generation_ != gen){
-                    self->log_debug("TIMER CANCELLED");
                     return;
                 }
 
-                self->log_debug("TIMER INTERRUPT.");
                 self->timer_active_ = false;
                 self->skip_missing_head_and_drain_locked(std::move(handler));
             });
@@ -280,6 +259,15 @@ private:
             }
         }
         return 0;
+    }
+
+
+    template<typename... Args>
+    void log_warn(fmt::format_string<Args...> fmt_str, Args&&... args) const{
+        if(logger_){
+            LOG_WARNING(logger_, "[ReorderBuffer] {}",
+                        fmt::format(fmt_str, std::forward<Args>(args)...));
+        }
     }
 
 

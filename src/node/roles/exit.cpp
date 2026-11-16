@@ -181,8 +181,6 @@ void Exit::continue_process_raw_packet(ArenaSlot<utun::RawPacket> raw_packet, st
                                                       ? udp_socketv4_
                                                       : udp_socketv6_;
 
-    LOG_DEBUG(logger_, "Sending back packet: cid: {}, seq_id: {}", circuit_info->circuit_id, seq_id);
-
     // @formatter:off
     sock->async_send_to(
         outgoing,
@@ -222,7 +220,7 @@ void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp
     }
 
     if(!parse_headers_incoming_packet(packet)){
-        LOG_ERROR(logger_, "Failed to parse incoming packet.");
+        LOG_WARNING(logger_, "Failed to parse incoming packet.");
         return;
     }
 
@@ -240,7 +238,7 @@ void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp
 void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio::ip::udp::endpoint& relay_endpoint){
     const size_t min_sz = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ;
     if(packet->bytes_received < min_sz){
-        LOG_ERROR(logger_, "Dropping control packet at exit: size too small ({})", packet->bytes_received);
+        LOG_WARNING(logger_, "Dropping control packet at exit: size too small ({})", packet->bytes_received);
         return;
     }
 
@@ -256,7 +254,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
     switch(chdr.msg_type){
         case ControlMsgType::EXIT_HANDSHAKE_REQ: {
             if(body_len < sizeof(ExitHandshakeReq)){
-                LOG_ERROR(logger_, "ExitCircuitCreateReq payload too small.");
+                LOG_WARNING(logger_, "ExitCircuitCreateReq payload too small.");
                 return;
             }
             ExitHandshakeReq req{};
@@ -279,9 +277,6 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 LOG_ERROR(logger_, "Exit failed to compute shared secret SH_CE with client for cid: {}", cid);
                 return;
             }
-            LOG_DEBUG(logger_, "Computed shared key successfully.");
-            LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                      sh_ce[0], sh_ce[1], sh_ce[2], sh_ce[3], sh_ce[4], sh_ce[5], sh_ce[6], sh_ce[7]);
 
             // insert cid in cid_ci_umap_
             {
@@ -308,7 +303,6 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 });
 
                 cid_ci_umap_.put(cid, ci);
-                LOG_DEBUG(logger_, "updated cid_ci_umap_, cid: {}", cid);
             }
 
             // update sant_nt_ci_umap_/nt_ci_umap_ (assign virtual ip to client, use that for nt_ci)
@@ -431,14 +425,8 @@ circuit_id is at the start
     // decrypt using sh_ce
     auto circuit_info = cid_ci_umap_.get(packet->cid);
     if(circuit_info){
-        LOG_DEBUG(logger_, "EXIT: DECRYPTING, cid: {}", packet->cid);
-        LOG_DEBUG(logger_, "sh_ce[0..7]: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                  circuit_info->sh_ce[0], circuit_info->sh_ce[1], circuit_info->sh_ce[2], circuit_info->sh_ce[3], circuit_info->sh_ce[4], circuit_info->sh_ce[5], circuit_info->sh_ce[6], circuit_info->sh_ce[7]);
         size_t inner_len = packet->bytes_received - (sizeof(RoutingFlag) + TRANSIT_HDR_SZ);
         crypto::decrypt_layer_ce(circuit_info->sh_ce, packet->payload.data() + sizeof(RoutingFlag) + TRANSIT_HDR_SZ, inner_len);
-    }
-    else{
-        LOG_DEBUG(logger_, "COULDN'T FIND ci: {}, didn't decrypt.", packet->cid);
     }
 
     constexpr size_t min_data_sz = sizeof(RoutingFlag) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;
@@ -484,7 +472,7 @@ void Exit::insert_into_rob(ArenaSlot<IncomingCell> packet){
             }
         )
     ){
-        LOG_ERROR(logger_, "Reorder buffer insert failed. Redo this log message with clearer error.");
+        LOG_WARNING(logger_, "Reorder buffer insert failed.");
     }
 }
 
@@ -513,10 +501,6 @@ void Exit::do_write_utun(sequence_id_t seq_id){
     // pkt stays alive, by reference:
     auto& pkt = utun_write_queue_.front();
 
-    const auto p = pkt->payload;
-    LOG_DEBUG(logger_, "utun write len={} first 8 bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-              pkt->payload_bytes, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
-
 #if defined(__APPLE__)
     std::array<asio::const_buffer, 2> bufs = {
         asio::buffer(&pkt->ip_version_macos, sizeof(pkt->ip_version_macos)),
@@ -530,7 +514,6 @@ void Exit::do_write_utun(sequence_id_t seq_id){
         if(ec){
             LOG_ERROR(me->logger_, "utun write error (seq {}): {}", seq_id, ec.message());
         }
-        LOG_DEBUG(me->logger_, "wrote to utun.");
 
         // stranded
         me->utun_write_queue_.pop_front();
