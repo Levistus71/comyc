@@ -585,7 +585,9 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         .circuit_id       = assigned_cid,
         .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(0),
         .mutating         = std::make_shared<std::atomic_bool>(false),
+        .temp             = true,
         .relays           = {},
+        .sh_ce            = {},
         .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 1, 0, logger_),
         .nt               = nt,
         .activity_counter = std::make_shared<Statistics<10>>(),
@@ -663,6 +665,7 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         .circuit_id       = assigned_cid,
         .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(our_start_seq),
         .mutating         = std::make_shared<std::atomic_bool>(false),
+        .temp             = false,
         .relays           = selected_relays,
         .sh_ce            = sh_ce,
         .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, 2048, exit_start_seq, logger_),
@@ -774,7 +777,7 @@ incoming packet:
     std::memcpy(&thdr, packet->payload.data() + sizeof(RoutingFlag) + sizeof(session_id_t), TRANSIT_HDR_SZ);
     packet->cid = thdr.circuit_id;
 
-    if(packet->cid == static_cast<circuit_id_t>(-1) || thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)){
+    if(packet->cid == static_cast<circuit_id_t>(-1)){
         packet->start_offset = min_hdr_sz;
         packet->payload_bytes = packet->bytes_received - min_hdr_sz;
         packet->control_packet = true;
@@ -783,10 +786,20 @@ incoming packet:
 
     // decrypt using sh_ce
     auto ci = sid_ci_umap_.get(packet->sid);
-    if(ci){
+    if(ci && !ci->temp){
         size_t inner_cipher_len = packet->bytes_received - min_hdr_sz;
         crypto::decrypt_layer_ce(ci->sh_ce, packet->payload.data() + min_hdr_sz, inner_cipher_len);
     }
+
+    if(thdr.flags == static_cast<uint16_t>(ThdrFlag::CONTROL)){
+        packet->start_offset = min_hdr_sz;
+        packet->payload_bytes = packet->bytes_received - min_hdr_sz;
+        packet->control_packet = true;
+        return true;
+    }
+
+    if(packet->control_packet)
+        return true;
 
     constexpr size_t min_data_sz = sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ + PAYLOAD_HDR_SZ;
     if(packet->bytes_received < min_data_sz){
@@ -815,6 +828,7 @@ incoming packet:
 
 
 void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet){
+    LOG_INFO(logger_, "handling control packet");
     constexpr size_t header_len = sizeof(RoutingFlag) + sizeof(session_id_t) + TRANSIT_HDR_SZ;
     if(packet->bytes_received < header_len + CONTROL_HDR_SZ){
         LOG_WARNING(logger_, "Dropping control packet from relay: size too small ({})", packet->bytes_received);
@@ -831,6 +845,7 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet){
 
     switch(chdr.msg_type){
         case ControlMsgType::EXIT_SHUTDOWN_SYN: {
+            LOG_INFO(logger_, "handling exit shutdown syn");
             if(body_len < sizeof(ExitShutdownSyn)){
                 LOG_WARNING(logger_, "Incorrect packet size for exit_shutdown_syn received.");
                 return;
@@ -848,6 +863,7 @@ void Client::handle_control_from_relay(const ArenaSlot<IncomingCell>& packet){
             if(known_relays_){
                 Node::resume_control_operation(chdr.txn_id, std::move(payload_data), known_relays_);
             }
+            LOG_INFO(logger_, "control packet fell to default.");
             return;
         }
     }
@@ -1270,10 +1286,17 @@ asio::awaitable<void> Client::send_exit_shutdown_ack(const std::shared_ptr<Circu
     co_return;
 }
 
-// TODO: BUG: FIXME: NOTE: NOT THREAD SAFE
+
+#include <iostream>
+
 asio::awaitable<void> Client::handle_exit_shutdown(ExitShutdownSyn syn, txn_id_t inc_txn_id){
     LOG_INFO(logger_, "Exit on cid: {} shutting down, handling...", syn.cid);
     auto old_circuit_info = cid_ci_umap_.get(syn.cid);
+
+    if(!old_circuit_info){
+        LOG_WARNING(logger_, "Received ExitShutdownSyn for unknown cid: {}", syn.cid);
+        co_return;
+    }
 
     co_await send_exit_shutdown_ack(old_circuit_info, inc_txn_id);
 
@@ -1282,13 +1305,19 @@ asio::awaitable<void> Client::handle_exit_shutdown(ExitShutdownSyn syn, txn_id_t
         co_return;
     }
 
-    auto new_circuit_info  = std::make_shared<CircuitInfo>(*old_circuit_info);
+    auto new_circuit_info = std::make_shared<CircuitInfo>(*old_circuit_info);
 
     // delete exit & find new exit
     asio::ip::udp::endpoint new_exit_ep;
     {
         std::lock_guard<std::mutex> lock(exits_mtx_);
         exits_.erase(new_circuit_info->exit_ep);
+        if(exits_.empty()){
+            LOG_WARNING(logger_, "No alternative exits available after removing {}. Dropping circuit {}.",
+                        new_circuit_info->exit_ep.address().to_string(), new_circuit_info->circuit_id);
+            old_circuit_info->mutating->store(false, std::memory_order::release);
+            co_return;
+        }
         new_exit_ep = RandomGen::choose_exit(exits_);
     }
 
@@ -1408,8 +1437,8 @@ asio::awaitable<void> Client::handle_exit_shutdown(ExitShutdownSyn syn, txn_id_t
 
     // setup remaining relays
     // todo: in parallel
-    for(auto& relay : new_circuit_info->relays){
-        if(relay==primary_relay)
+    for(auto& relay: new_circuit_info->relays){
+        if(relay == primary_relay)
             continue;
 
         txn_id_t txn_id = RandomGen::gen_txn_id();

@@ -131,7 +131,7 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
     LOG_INFO(logger_, "Started v4 listening on port: {}", udp_socketv4_->local_endpoint().port());
     LOG_INFO(logger_, "Started v6 listening on port: {}", udp_socketv6_->local_endpoint().port());
 
-    if(relays_info_glb_){
+    if(client_ || relay_){
         if(options->bootstrap_node){
             LOG_INFO(logger_, "I'm Bootstrap Bill, skipping establish_connection...");
         }
@@ -166,10 +166,10 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
 }
 
 
-void Node::stop(){
+asio::awaitable<void> Node::stop(){
     if(bool expected = true; running_.compare_exchange_strong(expected, false) == false){
         LOG_ERROR(logger_, "stop() called when not running_.");
-        return;
+        co_return;
     }
 
     stats_reporter_->stop();
@@ -182,8 +182,9 @@ void Node::stop(){
     if(relay_ != nullptr)
         relay_->stop();
 
-    if(exit_ != nullptr)
-        exit_->stop();
+    if(exit_ != nullptr){
+        co_await exit_->stop();
+    }
 
     boost::system::error_code ec;
     ec = udp_socketv4_->close(ec);

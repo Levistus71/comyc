@@ -584,6 +584,7 @@ struct CircuitInfo{
     circuit_id_t circuit_id;
     std::shared_ptr<std::atomic<sequence_id_t>> sequence_id_ptr;
     std::shared_ptr<std::atomic_bool> mutating;     // true when exit's changing, false otherwise
+    bool temp;
     std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
 
     std::array<uint8_t, 32> sh_ce{};

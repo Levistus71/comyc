@@ -105,10 +105,13 @@ int main(const int argc, char* argv[]){
 
     auto shutdown = [&](){
         LOG_INFO(main_logger, "Stopping node and releasing work guard.");
-        node->stop();
+        asio::co_spawn(ioc, [node]() -> asio::awaitable<void> {
+                           co_await node->stop();
+                       },
+                       asio::detached);
         work_guard.reset(); // ioc.run() to returns once remaining handlers finish
 
-        auto force_timer = std::make_shared<asio::steady_timer>(ioc, std::chrono::seconds(3));
+        auto force_timer = std::make_shared<asio::steady_timer>(ioc, std::chrono::seconds(10));
         force_timer->async_wait([&ioc, force_timer, main_logger](const boost::system::error_code& ec){
             if(!ec){
                 LOG_WARNING(main_logger, "Graceful shutdown timed out: forcing ioc.stop().");

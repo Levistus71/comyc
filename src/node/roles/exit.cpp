@@ -57,11 +57,13 @@ Exit::~Exit(){
 }
 
 
-void Exit::stop(){
+asio::awaitable<void> Exit::stop(){
     if(bool expected = true; running_.compare_exchange_strong(expected, false) == false){
-        LOG_ERROR(logger_, "Called start() more than once.");
-        return;
+        LOG_ERROR(logger_, "Called stop() more than once.");
+        co_return;
     }
+
+    LOG_INFO(logger_, "STOP EXIT REQUESTED");
 
     std::shared_ptr<std::unordered_map<circuit_id_t, std::shared_ptr<CircuitInfo>>> umap_wrap = cid_ci_umap_.get_raw_map();
     for(auto& pair: *umap_wrap){
@@ -71,10 +73,17 @@ void Exit::stop(){
                        },
                        asio::detached);
     }
+
+    auto executor = co_await asio::this_coro::executor;
+    asio::steady_timer timer(executor, std::chrono::seconds(5));
+
+    co_await timer.async_wait(asio::use_awaitable);
 }
 
 
 asio::awaitable<void> Exit::send_shutdown_syn(circuit_id_t circuit_id, std::shared_ptr<CircuitInfo> circuit_info){
+    LOG_INFO(logger_, "Sending shutdown syns to circuit_id: {}", circuit_id);
+
     txn_id_t txn_id = RandomGen::gen_txn_id();
 
     std::vector<uint8_t> shutdown_syn_packet = make_shutdown_syn_packet(circuit_id, txn_id);
@@ -87,7 +96,7 @@ asio::awaitable<void> Exit::send_shutdown_syn(circuit_id_t circuit_id, std::shar
 
     for(const auto& relay: circuit_info->relays){
         const auto ep = relay->endpoint;
-        auto res = co_await Node::control_send_and_wait_udp(udp_socketv4_, std::vector<uint8_t>{}, ep,
+        auto res = co_await Node::control_send_and_wait_udp(udp_socketv4_, shutdown_syn_packet, ep,
                                                             txn_id, glb_, logger_, stats_reporter_);
 
         if(std::holds_alternative<std::vector<uint8_t>>(res)){
@@ -382,6 +391,7 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                     .circuit_id       = cid,
                     .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
                     .mutating         = std::make_shared<std::atomic_bool>(false),
+                    .temp             = false,
                     .relays           = std::move(relays),
                     .sh_ce            = sh_ce,
                     .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq, logger_),

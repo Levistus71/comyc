@@ -59,7 +59,7 @@ public:
     [[nodiscard]] asio::awaitable<bool> start(std::shared_ptr<cli::CliOptions> cli_options);
 
 
-    void stop();
+    asio::awaitable<void> stop();
 
 
     class CommError{

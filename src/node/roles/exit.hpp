@@ -75,7 +75,7 @@ public:
     [[nodiscard]] bool start();
 
 
-    void stop();
+    asio::awaitable<void> stop();
 
 
     void process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp::endpoint sender_endpoint);
