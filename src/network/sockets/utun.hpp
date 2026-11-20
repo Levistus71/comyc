@@ -169,8 +169,11 @@ private:
 
     bool enable_ip_forwarding() const;
 
-
+#if defined(__APPLE__)
     bool enable_exit_nat(const std::string& en0 = "en0") const;
+#elif defined(__linux__)
+    bool enable_exit_nat(const std::string& wlp1s0 = "wlp1s0") const;
+#endif
 
 
     bool disable_exit_nat();

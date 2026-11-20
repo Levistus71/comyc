@@ -1,4 +1,5 @@
-(?d)build
+(?d)cmake-build-debug
+(?d)cmake-build-release
 (?d).vscode
 (?d)/local_testing/logs
 (?d).git

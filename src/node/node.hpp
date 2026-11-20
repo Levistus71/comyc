@@ -103,7 +103,8 @@ public:
                                                       RelayInfo start_relay,
                                                       std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                       quill::Logger* logger,
-                                                      std::shared_ptr<Client> client);
+                                                      std::shared_ptr<Client> client,
+                                                      std::shared_ptr<network_stats::StatsReporter> stats_reporter);
 
 
     // todo: hardcoded ^ (192.168.0.101)
@@ -114,7 +115,8 @@ public:
     static asio::awaitable<CommError> establish_connection(const RelayInfo& relay,
                                                            std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                            std::shared_ptr<RelaysInfoGlb> known_relays,
-                                                           quill::Logger* logger);
+                                                           quill::Logger* logger,
+                                                           std::shared_ptr<network_stats::StatsReporter> stats_reporter);
 
 
     static void resume_control_operation(txn_id_t txn_id,
@@ -130,7 +132,8 @@ public:
                                                                     asio::ip::udp::endpoint endpoint,
                                                                     txn_id_t txn_id,
                                                                     std::shared_ptr<RelaysInfoGlb> relays_info_glb,
-                                                                    quill::Logger* logger);
+                                                                    quill::Logger* logger,
+                                                                    std::shared_ptr<network_stats::StatsReporter> stats_reporter);
 
 
     struct Settings{
@@ -187,6 +190,7 @@ private:
     ArenaAllocator<IncomingCell> incoming_cell_pool_;
 
     quill::Logger* logger_{nullptr};
+    std::shared_ptr<network_stats::StatsReporter> stats_reporter_;
 
 
     static std::vector<uint8_t> make_connection_packet(const RelayInfo& relay, txn_id_t txn_id, const std::array<uint8_t, 32>& pubkey);
@@ -195,7 +199,8 @@ private:
     static asio::awaitable<std::vector<RelayInfo>> request_relay_list(RelayInfo& relay,
                                                                       std::shared_ptr<asio::ip::udp::socket> udp_sockv4,
                                                                       std::shared_ptr<RelaysInfoGlb> relays_info_glb,
-                                                                      quill::Logger* logger);
+                                                                      quill::Logger* logger,
+                                                                      std::shared_ptr<network_stats::StatsReporter> stats_reporter);
 
 
     static std::vector<uint8_t> make_request_relay_list_packet(RelayInfo& relay, txn_id_t txn_id);

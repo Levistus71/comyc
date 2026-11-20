@@ -30,7 +30,14 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # release flags
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -flto -ffast-math -funroll-loops -fomit-frame-pointer -fvisibility=hidden")
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-flto=auto")
+
+if(APPLE)
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,-dead_strip")
+else()
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -s")
+endif()
 
 
 # debug flags. uncomment either asan or tsan.
@@ -62,14 +69,14 @@ add_library(network
 target_include_directories(network PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(network PRIVATE Boost::headers quill::quill Threads::Threads fmt::fmt-header-only OpenSSL::Crypto)
 
-# NODE APP
-add_executable(node_app
+# APPLICATION
+add_executable(comyc
         src/node/main.cpp
         src/node/node.cpp
         src/node/roles/client.cpp
         src/node/roles/relay.cpp
         src/node/roles/exit.cpp
 )
-set_target_properties(node_app PROPERTIES OUTPUT_NAME "node")
-target_include_directories(node_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(node_app PRIVATE network Boost::headers quill::quill Threads::Threads fmt::fmt-header-only OpenSSL::Crypto)
+set_target_properties(comyc PROPERTIES OUTPUT_NAME "comyc")
+target_include_directories(comyc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(comyc PRIVATE network Boost::headers quill::quill Threads::Threads fmt::fmt-header-only OpenSSL::Crypto)

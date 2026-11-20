@@ -658,3 +658,254 @@ inline bool is_relay_diverse(const asio::ip::udp::endpoint& ep, const std::unord
     }
     return true;
 }
+
+
+namespace network_stats{
+// todo: align with cache line (idk if it's worth it lol, cache: 256B, this struct: 8B
+// no premature optimization, prove that this is the bottlenect before fixing.
+struct Counter{
+    std::atomic<uint64_t> value{0};
+
+
+    void add(uint64_t n = 1) noexcept{
+        value.fetch_add(n, std::memory_order_relaxed);
+    }
+
+
+    [[nodiscard]] uint64_t load() const noexcept{
+        return value.load(std::memory_order_relaxed);
+    }
+
+
+    uint64_t exchange(uint64_t desired = 0) noexcept{
+        return value.exchange(desired, std::memory_order_relaxed);
+    }
+};
+
+
+struct StatsSnapshot{
+    uint64_t packets_received{0};
+    uint64_t packets_sent{0};
+    uint64_t packets_forwarded{0};
+    uint64_t packets_dropped{0};
+
+    uint64_t bytes_received{0};
+    uint64_t bytes_sent{0};
+
+    uint64_t utun_packets_received{0};
+    uint64_t utun_packets_sent{0};
+    uint64_t utun_drops{0};
+
+    uint64_t crypto_failures{0};
+    uint64_t malformed_packets{0};
+    uint64_t active_circuits{0};
+};
+
+
+class NetworkStats{
+public:
+    NetworkStats() = default;
+
+
+    NetworkStats(const NetworkStats&) = delete;
+
+
+    NetworkStats& operator=(const NetworkStats&) = delete;
+
+
+    void on_packet_received(uint64_t bytes) noexcept{
+        packets_rx_.add(1);
+        bytes_rx_.add(bytes);
+    }
+
+
+    void on_packet_sent(uint64_t bytes) noexcept{
+        packets_tx_.add(1);
+        bytes_tx_.add(bytes);
+    }
+
+
+    void on_packet_forwarded(uint64_t bytes) noexcept{
+        packets_forwarded_.add(1);
+        bytes_tx_.add(bytes);
+    }
+
+
+    void on_utun_received(uint64_t bytes) noexcept{
+        utun_packets_read_.add(1);
+        bytes_rx_.add(bytes);
+    }
+
+
+    void on_utun_sent(uint64_t bytes) noexcept{
+        utun_packets_wrote_.add(1);
+        bytes_tx_.add(bytes);
+    }
+
+
+    void on_utun_drop() noexcept{
+        utun_drops_.add(1);
+        packets_dropped_.add(1);
+    }
+
+
+    void on_crypto_failure() noexcept{
+        crypto_failures_.add(1);
+        packets_dropped_.add(1);
+    }
+
+
+    void on_malformed_packet() noexcept{
+        malformed_packets_.add(1);
+        packets_dropped_.add(1);
+    }
+
+
+    void on_circuit_opened() noexcept{
+        active_sessions_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+
+    void on_circuit_closed() noexcept{
+        active_sessions_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+
+    [[nodiscard]] StatsSnapshot snapshot() const noexcept{
+        return StatsSnapshot{
+            .packets_received      = packets_rx_.load(),
+            .packets_sent          = packets_tx_.load(),
+            .packets_forwarded     = packets_forwarded_.load(),
+            .packets_dropped       = packets_dropped_.load(),
+            .bytes_received        = bytes_rx_.load(),
+            .bytes_sent            = bytes_tx_.load(),
+            .utun_packets_received = utun_packets_read_.load(),
+            .utun_packets_sent     = utun_packets_wrote_.load(),
+            .utun_drops            = utun_drops_.load(),
+            .crypto_failures       = crypto_failures_.load(),
+            .malformed_packets     = malformed_packets_.load(),
+            .active_circuits       = active_sessions_.load(std::memory_order_relaxed)
+        };
+    }
+
+
+    StatsSnapshot consume() noexcept{
+        return StatsSnapshot{
+            .packets_received      = packets_rx_.exchange(0),
+            .packets_sent          = packets_tx_.exchange(0),
+            .packets_forwarded     = packets_forwarded_.exchange(0),
+            .packets_dropped       = packets_dropped_.exchange(0),
+            .bytes_received        = bytes_rx_.exchange(0),
+            .bytes_sent            = bytes_tx_.exchange(0),
+            .utun_packets_received = utun_packets_read_.exchange(0),
+            .utun_packets_sent     = utun_packets_wrote_.exchange(0),
+            .utun_drops            = utun_drops_.exchange(0),
+            .crypto_failures       = crypto_failures_.exchange(0),
+            .malformed_packets     = malformed_packets_.exchange(0),
+            .active_circuits       = active_sessions_.load(std::memory_order_relaxed)
+        };
+    }
+
+private:
+    Counter packets_rx_;
+    Counter packets_tx_;
+    Counter packets_forwarded_;
+    Counter packets_dropped_;
+
+    Counter bytes_rx_;
+    Counter bytes_tx_;
+
+    Counter utun_packets_read_;
+    Counter utun_packets_wrote_;
+    Counter utun_drops_;
+
+    Counter crypto_failures_;
+    Counter malformed_packets_;
+
+    std::atomic<uint64_t> active_sessions_{0};
+};
+
+
+class StatsReporter : public std::enable_shared_from_this<StatsReporter>{
+public:
+    NetworkStats stats;
+
+
+    StatsReporter(asio::io_context& io,
+                  quill::Logger* logger,
+                  std::chrono::seconds interval = std::chrono::seconds(10)):
+        timer_(io),
+        logger_(logger),
+        interval_(interval){}
+
+
+    StatsReporter(const StatsReporter&) = delete;
+
+
+    StatsReporter(StatsReporter&&) = delete;
+
+
+    StatsReporter& operator=(const StatsReporter&) = delete;
+
+
+    StatsReporter& operator=(StatsReporter&&) = delete;
+
+
+    ~StatsReporter() = default;
+
+
+    void start(){
+        schedule();
+    }
+
+
+    void stop(){
+        timer_.cancel();
+    }
+
+private:
+    void schedule(){
+        timer_.expires_after(interval_);
+        timer_.async_wait([self = shared_from_this()](const boost::system::error_code& ec){
+            if(ec)
+                return;
+            self->report();
+            self->schedule();
+        });
+    }
+
+
+    void report(){
+        const auto d = stats.consume();
+        const auto secs = static_cast<double>(interval_.count());
+
+        const double rx_pps = static_cast<double>(d.packets_received) / secs;
+        const double tx_pps = static_cast<double>(d.packets_sent) / secs;
+        const double rx_mbps = (static_cast<double>(d.bytes_received) * 8.0) / (secs * 1'000'000.0);
+        const double tx_mbps = (static_cast<double>(d.bytes_sent) * 8.0) / (secs * 1'000'000.0);
+
+        const double utun_tx_pps = (static_cast<double>(d.utun_packets_sent) * 8.0) / (secs * 1'000'000.0);
+        const double utun_rx_pps = (static_cast<double>(d.utun_packets_received) * 8.0) / (secs * 1'000'000.0);
+
+
+        LOG_INFO(logger_,
+         "[STATS] Sessions: {} | "
+         "Received: {:.1f} pps ({:.2f} Mbps), total: {} | "
+         "Sent: {:.1f} pps ({:.2f} Mbps), total: {} | "
+         "Forwarded: {} | "
+         "UTUN: sent: {}, received: {}, total: {} | "
+         "Drop: {} (Crypto: {}, Malformed: {}, UTUN: {})",
+         d.active_circuits,
+         rx_pps, rx_mbps, d.packets_received,
+         tx_pps, tx_mbps, d.packets_sent,
+         d.packets_forwarded,
+         d.utun_packets_sent, d.utun_packets_received, d.utun_packets_received + d.utun_packets_sent,
+         d.packets_dropped, d.crypto_failures, d.malformed_packets, d.utun_drops);
+    }
+
+
+    asio::steady_timer timer_;
+    quill::Logger* logger_;
+    std::chrono::seconds interval_;
+};
+} // namespace net

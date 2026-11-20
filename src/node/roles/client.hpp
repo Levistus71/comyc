@@ -67,7 +67,8 @@ public:
            std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
            std::shared_ptr<RelaysInfoGlb> known_relays,
-           asio::ip::udp::endpoint exit_endpoint);
+           asio::ip::udp::endpoint exit_endpoint,
+           const std::shared_ptr<network_stats::StatsReporter>& stats_reporter);
 
 
     ~Client();
@@ -96,7 +97,7 @@ public:
 
 
     struct Settings{
-        static constexpr uint64_t HIGH_USAGE_THRESHOLD = 300;
+        static constexpr uint64_t HIGH_USAGE_THRESHOLD = 300'000;
         static constexpr uint64_t DEFAULT_NUM_ENTRY_RELAYS = 2;
 
         static_assert(DEFAULT_NUM_ENTRY_RELAYS < MAX_RELAYS_PER_CIRCUIT, "Default number of entry relays too large.");
@@ -138,7 +139,9 @@ private:
     bool utun_writing_{false};
     std::atomic<size_t> relay_rr_counter_{0}; // todo: move this to per-circuit counter
 
+    // logging
     quill::Logger* logger_{nullptr};
+    std::shared_ptr<network_stats::StatsReporter> stats_reporter_;
 
 
     inline void start_listening_utun();

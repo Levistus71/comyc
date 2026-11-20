@@ -1,7 +1,22 @@
-build
-.vscode
+# build folders
+
+cmake-build-debug
+cmake-build-release
+
+
+# macos
 .DS_Store
-local_testing/logs/
+
+
+# vscode
+.vscode
+
+
+# local_testing
+/local_testing/
+
+
+# syncthing
 *.sync-conflict-*
 .stfolder
 node_modules/

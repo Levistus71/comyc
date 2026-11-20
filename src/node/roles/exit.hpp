@@ -64,7 +64,8 @@ class Exit : public std::enable_shared_from_this<Exit>{
 public:
     Exit(asio::io_context& ioc,
          std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
-         std::shared_ptr<asio::ip::udp::socket> udp_socketv6);
+         std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
+         const std::shared_ptr<network_stats::StatsReporter>& stats_reporter);
 
 
     ~Exit();
@@ -98,6 +99,7 @@ private:
     Utun utun_;
 
     quill::Logger* logger_{nullptr};
+    std::shared_ptr<network_stats::StatsReporter> stats_reporter_;
 
     // from destination to client
     RCU_UMap<NetworkTuple, std::shared_ptr<CircuitInfo>> nt_ci_umap_;
