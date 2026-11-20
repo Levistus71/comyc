@@ -748,7 +748,32 @@ void Client::process_incoming_packet(ArenaSlot<IncomingCell> packet){
         return;
     }
 
-    insert_into_rob(std::move(packet));
+    // insert_into_rob(std::move(packet));
+
+    // scatter gather buffer. for macOS, we need to include ip version (4 bytes)
+#if defined(__APPLE__)
+    std::array<asio::const_buffer, 2> bufs = {
+        asio::buffer(&packet->ip_version_macos, FAMILY_HDR_UTUN_SZ),
+        asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
+    };
+#elif defined(__linux__)
+    std::array<asio::const_buffer, 1> bufs = {
+        asio::buffer(packet->payload.data() + packet->start_offset, packet->payload_bytes)
+    };
+#else
+    // not compatible
+#endif
+
+    auto lmb = [me = shared_from_this(), pkt = std::move(packet)](const boost::system::error_code& ec, std::size_t bytes_xfer){
+        if(ec){
+            LOG_ERROR(me->logger_, "utun write error (seq {}): {}", pkt->seq_id, ec.message());
+            me->stats_reporter_->stats.on_utun_drop();
+        }
+        me->stats_reporter_->stats.on_utun_sent(bytes_xfer);
+        // stranded
+        me->utun_write_queue_.pop_front();
+    };
+    utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_, std::move(lmb)));
 }
 
 
@@ -1244,7 +1269,7 @@ std::vector<uint8_t> Client::make_relay_change_exit_req_packet(const session_id_
     offset += TRANSIT_HDR_SZ;
 
     ControlHeader chdr{};
-    chdr.msg_type = ControlMsgType::EXIT_SHUTDOWN_ACK;
+    chdr.msg_type = ControlMsgType::RELAY_CHANGE_EXIT_REQ;
     chdr.flags = 0;
     chdr.payload_len = static_cast<uint16_t>(sizeof(RelayChangeExitReq));
     chdr.txn_id = txn_id;
