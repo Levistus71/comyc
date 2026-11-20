@@ -67,7 +67,7 @@ public:
            std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
            std::shared_ptr<RelaysInfoGlb> known_relays,
-           asio::ip::udp::endpoint exit_endpoint,
+           std::vector<asio::ip::udp::endpoint> exit_endpoints,
            const std::shared_ptr<network_stats::StatsReporter>& stats_reporter);
 
 

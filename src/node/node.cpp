@@ -42,21 +42,27 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
     relays_info_glb_ = std::make_shared<RelaysInfoGlb>();
 
     if(is_client){
-        asio::ip::udp::endpoint exit_endpoint;
+        std::vector<asio::ip::udp::endpoint> exit_endpoint;
         bool inited = false;
         if(options->specified_exit){
-            try{
-                exit_endpoint = asio::ip::udp::endpoint(asio::ip::make_address(options->exit_ip), options->exit_port);
-                inited = true;
+            if(options->exit_ip.size() != options->exit_port.size()){
+                LOG_ERROR(logger_, "IP and PORT sizes dont match. recheck flags.");
+                throw std::runtime_error("asdf");
             }
-            catch(...){
-                LOG_ERROR(logger_, "Specified exit address unable to be converted to valid address: {}", options->exit_ip);
-                LOG_ERROR(logger_, "Using default exit address.");
+            for(size_t i=0;i<options->exit_ip.size();i++){
+                try{
+                    exit_endpoint.emplace_back(asio::ip::make_address(options->exit_ip[i]), options->exit_port[i]);
+                    inited = true;
+                }
+                catch(...){
+                    LOG_ERROR(logger_, "Specified exit address unable to be converted to valid address: {}", options->exit_ip[i]);
+                    LOG_ERROR(logger_, "Using default exit address.");
+                }
             }
         }
         if(!inited){
             // todo: change this from google dns
-            exit_endpoint = asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 6969);
+            exit_endpoint.emplace_back(asio::ip::make_address("8.8.8.8"), 6969);
         }
 
         client_ = std::make_shared<Client>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_, exit_endpoint, stats_reporter_);

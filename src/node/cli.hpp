@@ -20,8 +20,8 @@ struct CliOptions{
     uint16_t bootstrap_port = 6969;
 
     bool specified_exit = false;
-    std::string exit_ip = "8.8.8.8";
-    uint16_t exit_port = 6969;
+    std::vector<std::string> exit_ip = {};
+    std::vector<uint16_t> exit_port = {};
 
     size_t thread_count = std::max(1u, std::thread::hardware_concurrency());
     std::string log_file = "logs.txt";
@@ -227,7 +227,7 @@ public:
                 auto val = get_value(key);
                 if(!val)
                     return std::nullopt;
-                opts.exit_ip = std::string(*val);
+                opts.exit_ip.emplace_back(*val);
             }
             else if(key=="--exit-port"){
                 opts.specified_exit = true;
@@ -238,7 +238,7 @@ public:
                         std::cerr << "Error: Exit port must be in range 1 - 65535, got '" << *val << "'\n";
                         return std::nullopt;
                     }
-                    opts.exit_port = static_cast<uint16_t>(p);
+                    opts.exit_port.push_back(static_cast<uint16_t>(p));
                 }
                 catch(...){
                     std::cerr << "Error: Invalid Exit port '" << *val << "'\n";

@@ -58,7 +58,7 @@ Client::Client(asio::io_context& ioc,
                std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
                std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
                std::shared_ptr<RelaysInfoGlb> known_relays,
-               asio::ip::udp::endpoint exit_endpoint,
+               std::vector<asio::ip::udp::endpoint> exit_endpoints,
                const std::shared_ptr<network_stats::StatsReporter>& stats_reporter):
     ioc_(ioc),
     udp_socketv4_(std::move(udp_socketv4)),
@@ -76,7 +76,9 @@ Client::Client(asio::io_context& ioc,
     do{
         default_vpn_v6_ = RandomGen::gen_address_v6();
     } while(default_vpn_v6_.to_bytes()[0] == 0xFF);
-    exits_ = {std::move(exit_endpoint)};
+    for(auto& t : exit_endpoints){
+        exits_.insert(std::move(t));
+    }
 }
 
 
