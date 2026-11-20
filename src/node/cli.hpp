@@ -141,6 +141,7 @@ public:
             }
             if(arg == "-d" || arg=="--demo"){
                 opts.demo_mode = true;
+                continue;
             }
 
             // Options taking a value
