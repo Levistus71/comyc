@@ -21,7 +21,6 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 
 #include <quill/LogMacros.h>
-#include <sys/proc.h>
 
 namespace asio = boost::asio;
 
@@ -1333,6 +1332,9 @@ asio::awaitable<void> Client::handle_exit_shutdown(ExitShutdownSyn syn, txn_id_t
     }
 
     auto new_circuit_info = std::make_shared<CircuitInfo>(*old_circuit_info);
+    // fixme: not atomic
+    old_circuit_info->temp = true;
+    new_circuit_info->temp = false;
 
     // delete exit & find new exit
     asio::ip::udp::endpoint new_exit_ep;
