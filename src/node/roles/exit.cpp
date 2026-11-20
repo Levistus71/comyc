@@ -331,7 +331,6 @@ void Exit::process_incoming_packet(ArenaSlot<IncomingCell> packet, asio::ip::udp
         }
         me->stats_reporter_->stats.on_utun_sent(bytes_xfer);
         // stranded
-        me->utun_write_queue_.pop_front();
     };
     utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_, std::move(lmb)));
 }
