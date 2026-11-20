@@ -674,6 +674,15 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
         std::string exit_str = exit_ep.address().to_string() + ":" + std::to_string(exit_ep.port());
         std::string dest_str = nt.has_value() ? nt->to_string() : "default";
         telemetry::DemoReporter::instance().update_circuit(assigned_cid, relays_str, exit_str, dest_str);
+        LOG_INFO(logger_, "Updated DemoReporter.");
+        LOG_DEBUG(logger_, "DEBUG: ");
+        LOG_DEBUG(logger_, "\tassigned_cid: {}", assigned_cid);
+        LOG_DEBUG(logger_, "\trelays_str:");
+        for(auto& str : relays_str){
+            LOG_DEBUG(logger_, "\t\t{}", str);
+        }
+        LOG_DEBUG(logger_, "\texit_str:{}", exit_str);
+        LOG_DEBUG(logger_, "\tdest_str:{}", dest_str);
     }
 
     // update nt_ci_umap_. new packets should use the new ci from now

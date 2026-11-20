@@ -35,12 +35,27 @@ class TopologyState:
     def update_node(self, data: Dict[str, Any], sender_addr):
         node_id = data.get("node_id")
         if not node_id:
+            logger.warning(f"[STATE] Dropping packet missing 'node_id' from {sender_addr}: {data}")
             return
 
         ip = sender_addr[0]
         port = data.get("port") or sender_addr[1]
         role = data.get("role", "unknown")
-        circuits = data.get("circuits", [])
+        raw_circuits = data.get("circuits", [])
+
+        # Normalize circuits so "relays" is always a list of strings
+        circuits = []
+        for c in raw_circuits:
+            relays = c.get("relays")
+            if relays is None and "relay" in c:
+                relays = [c["relay"]] if c["relay"] else []
+
+            circuits.append({
+                "cid": c.get("cid"),
+                "relays": relays or [],
+                "exit": c.get("exit"),
+                "dest": c.get("dest", "")
+            })
 
         self.nodes[node_id] = {
             "node_id": node_id,
@@ -50,6 +65,10 @@ class TopologyState:
             "circuits": circuits,
             "last_seen": time.time()
         }
+        logger.info(
+            f"[STATE] Updated node '{node_id}' (role={role}, addr={ip}:{port}, circuits={len(circuits)}). "
+            f"Total active nodes: {len(self.nodes)}"
+        )
         self.notify_subscribers()
 
     def prune_stale(self) -> bool:
@@ -57,7 +76,7 @@ class TopologyState:
         stale = [nid for nid, n in self.nodes.items() if now - n["last_seen"] > self.ttl]
         if stale:
             for nid in stale:
-                logger.info(f"Pruning stale node: {nid}")
+                logger.info(f"[STATE] Pruning stale node: {nid}")
                 del self.nodes[nid]
             self.notify_subscribers()
             return True
@@ -66,23 +85,58 @@ class TopologyState:
     def get_snapshot(self) -> Dict[str, Any]:
         nodes_list = []
         circuits_list = []
-        
+        known_endpoints = set()
+
+        # 1. Add all nodes that sent direct heartbeats
         for n in self.nodes.values():
+            ep = f"{n['ip']}:{n['port']}"
+            known_endpoints.add(ep)
             nodes_list.append({
                 "id": n["node_id"],
                 "role": n["role"],
                 "ip": n["ip"],
                 "port": n["port"],
-                "label": f"{n['node_id']} ({n['ip']}:{n['port']})"
+                "label": f"{n['node_id']} ({ep})"
             })
+
+        # 2. Infer any relay/exit nodes from circuits if they aren't directly reporting
+        inferred_nodes: Dict[str, Dict[str, Any]] = {}
+
+        def ensure_inferred_node(endpoint: str, role: str):
+            if not endpoint or endpoint in known_endpoints or endpoint in inferred_nodes:
+                return
+            if ":" in endpoint:
+                ip, port_str = endpoint.rsplit(":", 1)
+                port = int(port_str) if port_str.isdigit() else 0
+            else:
+                ip, port = endpoint, 0
+
+            inferred_nodes[endpoint] = {
+                "id": f"{role}-{port or endpoint}",
+                "role": role,
+                "ip": ip,
+                "port": port,
+                "label": f"{role}-{port or endpoint} ({endpoint})"
+            }
+
+        for n in self.nodes.values():
             for c in n.get("circuits", []):
+                relays = c.get("relays", [])
+                exit_ep = c.get("exit", "")
+
+                for r_ep in relays:
+                    ensure_inferred_node(r_ep, "relay")
+                ensure_inferred_node(exit_ep, "exit")
+
                 circuits_list.append({
                     "cid": c.get("cid"),
                     "client": n["node_id"],
-                    "relays": c.get("relays", []),
-                    "exit": c.get("exit"),
+                    "relays": relays,
+                    "exit": exit_ep,
                     "dest": c.get("dest", "")
                 })
+
+        nodes_list.extend(inferred_nodes.values())
 
         return {
             "nodes": nodes_list,
@@ -93,11 +147,15 @@ class TopologyState:
     def notify_subscribers(self):
         snapshot = self.get_snapshot()
         raw = json.dumps(snapshot)
+        logger.info(
+            f"[SSE BROADCAST] Sending snapshot ({len(snapshot['nodes'])} nodes, "
+            f"{len(snapshot['circuits'])} circuits) to {len(self.subscribers)} browser client(s)"
+        )
         for q in list(self.subscribers):
             try:
                 q.put_nowait(raw)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[SSE BROADCAST] Failed queuing update for subscriber: {e}")
 
 
 class TelemetryProtocol(asyncio.DatagramProtocol):
@@ -105,11 +163,15 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
         self.state = state
 
     def datagram_received(self, data: bytes, addr):
+        raw_text = data.decode("utf-8", errors="replace")
+        # logger.info(f"[UDP IN] From {addr[0]}:{addr[1]} ({len(data)} bytes): {raw_text}")
         try:
-            payload = json.loads(data.decode("utf-8"))
+            payload = json.loads(raw_text)
             self.state.update_node(payload, addr)
+        except json.JSONDecodeError as e:
+            logger.error(f"[UDP JSON ERROR] Malformed JSON from {addr}: {e}")
         except Exception as e:
-            logger.debug(f"Invalid telemetry datagram from {addr}: {e}")
+            logger.error(f"[UDP ERROR] Failed processing datagram from {addr}: {e}", exc_info=True)
 
 
 async def handle_events(reader, writer, state: TopologyState):
@@ -123,6 +185,7 @@ async def handle_events(reader, writer, state: TopologyState):
 
     queue = asyncio.Queue(maxsize=32)
     state.subscribers.add(queue)
+    logger.info(f"[SSE] Browser connected (active subscribers: {len(state.subscribers)})")
 
     # Initial snapshot
     initial_raw = json.dumps(state.get_snapshot())
@@ -138,6 +201,7 @@ async def handle_events(reader, writer, state: TopologyState):
         pass
     finally:
         state.subscribers.discard(queue)
+        logger.info(f"[SSE] Browser disconnected (active subscribers: {len(state.subscribers)})")
         writer.close()
         try:
             await writer.wait_closed()
@@ -283,7 +347,6 @@ async def mock_generator(state: TopologyState, num_clients=3, num_relays=4, num_
         # Update clients with random active circuits
         for i in range(num_clients):
             cid_counter += 1
-            # Pick 1 to 2 random relays for the path
             hop_count = random.randint(1, min(2, len(relays)))
             r_path = random.sample(relays, hop_count)
             e = random.choice(exits)

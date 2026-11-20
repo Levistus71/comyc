@@ -26,7 +26,7 @@ public:
 
 
     [[nodiscard]] bool init(asio::io_context& ioc, const std::shared_ptr<asio::ip::udp::socket>& socket,
-              const std::shared_ptr<cli::CliOptions>& options, quill::Logger* logger){
+                            const std::shared_ptr<cli::CliOptions>& options, quill::Logger* logger){
         logger_ = logger;
 
         if(!options || !options->demo_mode){
@@ -48,10 +48,6 @@ public:
         target_endpoint_ = asio::ip::udp::endpoint(addr, options->demo_host_port);
 
         socket_ = socket;
-        if(socket_->open(target_endpoint_.protocol(), ec)){
-            log_error("socket is not to open.");
-            return false;
-        }
 
         timer_ = std::make_unique<asio::steady_timer>(ioc);
         schedule_timer();
@@ -89,7 +85,7 @@ public:
                 return;
             }
         }
-        circuits_.push_back({cid, relay_eps, exit_ep, dest});
+        circuits_.push_back({cid, relay_eps, exit_ep, dest});\
     }
 
 
@@ -107,14 +103,27 @@ public:
         if(!enabled_ || !socket_ || !socket_->is_open())
             return;
 
-        std::string json = build_telemetry_json();
-        auto buffer = std::make_shared<std::string>(std::move(json));
+        auto buffer = std::make_shared<std::string>(build_telemetry_json());
+
+        log_info("sending telemetry list to demo server...");
 
         socket_->async_send_to(
             asio::buffer(*buffer),
             target_endpoint_,
-            [keep_alive = buffer](const boost::system::error_code&, std::size_t){
-                // fire and forget
+            [this, keep_alive = buffer](const boost::system::error_code& ec, std::size_t bytes_sent){
+                if(ec){
+                    log_error("failed to send telemetry to {}:{} ({}): {}",
+                              target_endpoint_.address().to_string(),
+                              target_endpoint_.port(),
+                              ec.value(),
+                              ec.message());
+                }
+                else{
+                    log_debug("sent {} bytes to {}:{}",
+                              bytes_sent,
+                              target_endpoint_.address().to_string(),
+                              target_endpoint_.port());
+                }
             }
         );
     }
@@ -152,6 +161,18 @@ private:
     }
 
 
+    static std::string extract_endpoint(const std::string& raw){
+        const std::string key = "endpoint: ";
+        auto pos = raw.find(key);
+        if(pos == std::string::npos){
+            return raw;
+        }
+        pos += key.size();
+        auto end = raw.find_first_of(",}", pos);
+        return raw.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    }
+
+
     std::string build_telemetry_json(){
         std::lock_guard<std::mutex> lock(mutex_);
         std::ostringstream ss;
@@ -170,13 +191,13 @@ private:
                 << "\"relays\": [";
 
             for(size_t j = 0; j < c.relays.size(); ++j){
-                ss << "\"" << c.relays[j] << "\"";
+                ss << "\"" << extract_endpoint(c.relays[j]) << "\"";
                 if(j + 1 < c.relays.size())
                     ss << ", ";
             }
 
             ss << "], "
-                << R"("exit": ")" << c.exit << "\"";
+                << R"("exit": ")" << extract_endpoint(c.exit) << "\"";
             if(!c.dest.empty()){
                 ss << R"(, "dest": ")" << c.dest << "\"";
             }

@@ -35,7 +35,7 @@ const nodeTypes = {
 };
 
 const getRoleColumn = (role: string): number => {
-  if (role === 'client') return 0;
+  if (role === 'client' || role === 'client-relay') return 0;
   if (role === 'relay' || role === 'client-relay') return 1;
   if (role === 'exit') return 2;
   return 1;
@@ -177,41 +177,57 @@ export default function App() {
     });
 
     const flowEdges: Edge[] = [];
-    rawCircuits.forEach((c) => {
-      const relayNodeIds = (c.relays || [])
-        .map((rEp) => epToNodeId.get(rEp))
-        .filter((id): id is string => Boolean(id));
-      const exitNodeId = epToNodeId.get(c.exit);
+        rawCircuits.forEach((c) => {
+          const relayNodeIds = (c.relays || [])
+            .map((rEp) => epToNodeId.get(rEp))
+            .filter((id): id is string => Boolean(id));
+          const exitNodeId = epToNodeId.get(c.exit);
 
-      const isCircuitActive =
-        !selectedNodeId || isNodeInCircuit(selectedNodeId, c);
+          const isCircuitActive =
+            !selectedNodeId || isNodeInCircuit(selectedNodeId, c);
 
-      // Build ordered hop chain: [client, ...relays, exit]
-      const hopNodeIds = [c.client, ...relayNodeIds];
-      if (exitNodeId) {
-        hopNodeIds.push(exitNodeId);
-      }
+          if (relayNodeIds.length > 0) {
+            relayNodeIds.forEach((relayNodeId, idx) => {
+              // Client -> Relay_i (muted blue)
+              flowEdges.push({
+                id: `edge-${c.cid}-cr-${idx}`,
+                source: c.client,
+                target: relayNodeId,
+                style: {
+                  stroke: isCircuitActive ? '#60a5fa' : '#2e2e2e',
+                  strokeWidth: isCircuitActive ? 1.5 : 1,
+                  opacity: isCircuitActive ? 0.85 : 0.25,
+                },
+              });
 
-      for (let idx = 0; idx < hopNodeIds.length - 1; idx++) {
-        const sourceId = hopNodeIds[idx];
-        const targetId = hopNodeIds[idx + 1];
-        const isExitHop = Boolean(exitNodeId) && idx === hopNodeIds.length - 2;
-
-        // First/relay hops: muted blue (#60a5fa), final hop into exit: muted emerald (#34d399)
-        const activeColor = isExitHop ? '#34d399' : '#60a5fa';
-
-        flowEdges.push({
-          id: `edge-${c.cid}-hop-${idx}`,
-          source: sourceId,
-          target: targetId,
-          style: {
-            stroke: isCircuitActive ? activeColor : '#2e2e2e',
-            strokeWidth: isCircuitActive ? 1.5 : 1,
-            opacity: isCircuitActive ? 0.85 : 0.25,
-          },
+              // Relay_i -> Exit (muted emerald)
+              if (exitNodeId) {
+                flowEdges.push({
+                  id: `edge-${c.cid}-re-${idx}`,
+                  source: relayNodeId,
+                  target: exitNodeId,
+                  style: {
+                    stroke: isCircuitActive ? '#34d399' : '#2e2e2e',
+                    strokeWidth: isCircuitActive ? 1.5 : 1,
+                    opacity: isCircuitActive ? 0.85 : 0.25,
+                  },
+                });
+              }
+            });
+          } else if (exitNodeId) {
+            // Direct Client -> Exit fallback if no relays are present
+            flowEdges.push({
+              id: `edge-${c.cid}-ce`,
+              source: c.client,
+              target: exitNodeId,
+              style: {
+                stroke: isCircuitActive ? '#34d399' : '#2e2e2e',
+                strokeWidth: isCircuitActive ? 1.5 : 1,
+                opacity: isCircuitActive ? 0.85 : 0.25,
+              },
+            });
+          }
         });
-      }
-    });
 
     const layouted = getLayoutedElements(flowNodes, flowEdges);
     setNodes(layouted.nodes);
@@ -226,8 +242,8 @@ export default function App() {
     setSelectedNodeId(null);
   }, []);
 
-  const clientCount = snapshot.nodes.filter((n) => n.role === 'client').length;
-  const relayCount = snapshot.nodes.filter((n) => n.role === 'relay' || n.role === 'client-relay').length;
+  const clientCount = snapshot.nodes.filter((n) => n.role === 'client' || n.role === 'client-relay').length;
+  const relayCount = snapshot.nodes.filter((n) => n.role === 'relay').length;
   const exitCount = snapshot.nodes.filter((n) => n.role === 'exit').length;
 
   return (
@@ -282,7 +298,11 @@ export default function App() {
               </div>
             ) : (
               activeCircuits.map((ckt) => {
-                const pathHops = [ckt.client, ...(ckt.relays || []), ckt.exit].filter(Boolean);
+                const relaysLabel =
+                  ckt.relays && ckt.relays.length > 1
+                    ? `[${ckt.relays.join(', ')}]`
+                    : ckt.relays?.[0] || '';
+                const pathHops = [ckt.client, relaysLabel, ckt.exit].filter(Boolean);
                 return (
                   <div
                     key={ckt.cid}

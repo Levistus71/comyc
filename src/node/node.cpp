@@ -79,6 +79,16 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
 
     stats_reporter_->start();
 
+    if(options->demo_mode){
+        if(telemetry::DemoReporter::instance().init(ioc_, udp_socketv4_, options, logger_)){
+            LOG_INFO(logger_, "Demo reporter initialized towards {}:{}", options->demo_host_ip, options->demo_host_port);
+        }
+        else{
+            LOG_ERROR(logger_, "Demo reporter failed to start.");
+            co_return false;
+        }
+    }
+
     using udp = asio::ip::udp;
     boost::system::error_code ec;
     if((ec = udp_socketv4_->open(asio::ip::udp::v4(), ec))){
@@ -149,16 +159,6 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
     if(exit_ != nullptr){
         if(!exit_->start()){
             LOG_ERROR(logger_, "Exit not started.");
-            co_return false;
-        }
-    }
-
-    if(options->demo_mode){
-        if(telemetry::DemoReporter::instance().init(ioc_, udp_socketv4_, options, logger_)){
-            LOG_INFO(logger_, "Demo reporter initialized towards {}:{}", options->demo_host_ip, options->demo_host_port);
-        }
-        else{
-            LOG_ERROR(logger_, "Demo reporter failed to start.");
             co_return false;
         }
     }
