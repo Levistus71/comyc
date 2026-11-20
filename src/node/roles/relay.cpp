@@ -375,6 +375,58 @@ void Relay::handle_control_from_client(const session_id_t sid, const uint8_t* da
             return;
         }
 
+
+        case ControlMsgType::RELAY_CHANGE_EXIT_REQ: {
+            if(body_len < sizeof(RelayChangeExitReq)){
+                LOG_WARNING(logger_, "RelaySetupExitReq payload too small.");
+                stats_reporter_->stats.on_malformed_packet();
+                return;
+            }
+            RelayChangeExitReq req{};
+            std::memcpy(&req, msg_body, sizeof(RelayChangeExitReq));
+
+            auto cid = req.cid;
+
+            asio::ip::address_v4 exit_addr(req.exit_ipv4);
+            asio::ip::udp::endpoint exit_endpoint(exit_addr, req.exit_port);
+
+            // update sid_ei_umap_
+            ExitInfo new_exit{
+                .endpoint = exit_endpoint,
+                .sh_cr = sid_ei_umap_.get(sid)->sh_cr
+            };
+            sid_ei_umap_.put(sid, new_exit);
+
+            // no need to update cid_ci_umap_ and sid_ci_umap_
+
+            // send response
+            {
+                RelaySetupExitRes res{.status = 0};
+                auto resp_buf = make_relay_setup_exit_res_packet(sid, chdr, res);
+                // encrypt
+                {
+                    auto hdr_size = sizeof(RoutingFlag) + sizeof(session_id_t);
+                    crypto::encrypt_layer_cr(sh_cr, resp_buf.data() + hdr_size, resp_buf.size() - hdr_size);
+                }
+
+                auto sock = (sender_endpoint.protocol() == asio::ip::udp::v4()) ? udp_socketv4_ : udp_socketv6_;
+                auto send_data = std::make_shared<std::vector<uint8_t>>(std::move(resp_buf));
+                sock->async_send_to(
+                    asio::buffer(*send_data),
+                    sender_endpoint,
+                    [me=shared_from_this(), keep_alive = send_data](const boost::system::error_code& ec, size_t bytes_xfer){
+                        me->stats_reporter_->stats.on_packet_sent(bytes_xfer);
+                        if(ec){
+                            LOG_ERROR(me->logger_, "Failed to send RelaySetupExitRes: {}", ec.message());
+                        }
+                    }
+                );
+            }
+
+            return;
+        }
+
+
         default:
             LOG_WARNING(logger_, "Unhandled client control message: {}", static_cast<int>(chdr.msg_type));
             stats_reporter_->stats.on_malformed_packet();

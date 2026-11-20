@@ -39,8 +39,7 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
     dead_client_ = !is_pure_client && is_relay;
     const bool is_exit = static_cast<uint8_t>(role_) & static_cast<uint8_t>(NodeRole::EXIT);
 
-    if(is_client || is_relay)
-        relays_info_glb_ = std::make_shared<RelaysInfoGlb>();
+    relays_info_glb_ = std::make_shared<RelaysInfoGlb>();
 
     if(is_client){
         asio::ip::udp::endpoint exit_endpoint;
@@ -67,7 +66,7 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
         relay_ = std::make_shared<Relay>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_, stats_reporter_);
 
     if(is_exit)
-        exit_ = std::make_shared<Exit>(ioc_, udp_socketv4_, udp_socketv6_, stats_reporter_);
+        exit_ = std::make_shared<Exit>(ioc_, udp_socketv4_, udp_socketv6_, relays_info_glb_, stats_reporter_);
 }
 
 
@@ -554,8 +553,7 @@ asio::awaitable<Node::ControlResult> Node::control_send_and_wait_udp(std::shared
 
 void Node::listenv4(ArenaSlot<IncomingCell> packet){
     if(!packet){
-        LOG_ERROR(logger_, "listenv4 was called with null packet.");
-        stats_reporter_->stats.on_malformed_packet();
+        LOG_CRITICAL(logger_, "listenv4 was called with null packet.");
         return;
     }
 
@@ -575,8 +573,7 @@ void Node::listenv4(ArenaSlot<IncomingCell> packet){
 
 void Node::listenv6(ArenaSlot<IncomingCell> packet){
     if(!packet){
-        LOG_ERROR(logger_, "listenv6 was called with null packet.");
-        stats_reporter_->stats.on_malformed_packet();
+        LOG_CRITICAL(logger_, "listenv6 was called with null packet.");
         return;
     }
 

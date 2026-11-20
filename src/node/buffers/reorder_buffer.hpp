@@ -91,6 +91,12 @@ public:
         return current_wait_limit_;
     }
 
+
+    void change_head(sequence_id_t new_head){
+        std::unique_lock<std::mutex> lock(mtx_);
+        head_ = new_head;
+    }
+
 private:
     mutable std::mutex mtx_;
     asio::steady_timer timer_;

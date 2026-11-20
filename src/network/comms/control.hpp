@@ -27,10 +27,19 @@ enum class ControlMsgType : uint8_t{
 
     // client asking relay to store exit information (client | relay)
     RELAY_SETUP_EXIT_REQ = 11,
-    RELAY_SETUP_EXIT_RES = 12,
+    RELAY_CHANGE_EXIT_REQ = 12,
+    RELAY_SETUP_EXIT_RES = 13,
+
+    // exit shutdown
+    EXIT_SHUTDOWN_SYN = 14,
+    EXIT_SHUTDOWN_ACK = 15,
+
+    // relay shutdown
+    RELAY_SHUTDOWN_SYN = 16,
+    RELAY_SHUTDOWN_ACK = 17,
 
     // error
-    CONTROL_ERROR = 13
+    CONTROL_ERROR = 18
 };
 
 
@@ -245,3 +254,32 @@ struct ExitHandshakeRes{
 
 static_assert(sizeof(ExitHandshakeRes) == 56, "ExitCircuitCreateRes layout broken");
 static_assert(std::is_trivially_copyable_v<ExitHandshakeRes>, "ExitCircuitCreateRes not memcpy safe");
+
+
+struct ExitShutdownSyn{
+    circuit_id_t cid;
+};
+
+
+static_assert(sizeof(ExitShutdownSyn) == 8, "ExitShutdownSyn layout broken");
+static_assert(std::is_trivially_copyable_v<ExitShutdownSyn>, "ExitShutdownSyn not memcpy safe");
+
+
+struct ExitShutdownAck{
+    circuit_id_t cid;
+};
+
+
+static_assert(sizeof(ExitShutdownAck) == 8, "ExitShutdownAck layout broken");
+static_assert(std::is_trivially_copyable_v<ExitShutdownSyn>, "ExitShutdownAck not memcpy safe");
+
+
+struct RelayChangeExitReq{
+    circuit_id_t cid;
+    uint32_t exit_ipv4;
+    uint16_t exit_port;
+    uint8_t _reserved_[2];
+};
+
+static_assert(sizeof(RelayChangeExitReq) == 16, "RelayChangeExitReq layout broken");
+static_assert(std::is_trivially_copyable_v<RelayChangeExitReq>, "RelayChangeExitReq not memcpy safe");

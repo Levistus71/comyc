@@ -113,11 +113,13 @@ private:
     std::atomic<bool> running_;
 
     std::shared_ptr<RelaysInfoGlb> known_relays_;
-    std::shared_ptr<CircuitInfo> default_ci_;
+    std::atomic<std::shared_ptr<CircuitInfo>> default_ci_;
     asio::ip::address_v4 default_vpn_v4_;
     asio::ip::address_v6 default_vpn_v6_;
 
-    std::vector<asio::ip::udp::endpoint> exits_;
+    // exits
+    std::mutex exits_mtx_;
+    std::unordered_set<asio::ip::udp::endpoint> exits_;
 
     ArenaAllocator<utun::RawPacket> raw_packet_pool_;
 
@@ -142,6 +144,9 @@ private:
     // logging
     quill::Logger* logger_{nullptr};
     std::shared_ptr<network_stats::StatsReporter> stats_reporter_;
+
+    // exit shutting down
+    RCU_UMap<circuit_id_t, std::shared_ptr<CircuitInfo>> cid_ci_umap_;
 
 
     inline void start_listening_utun();
@@ -196,7 +201,7 @@ private:
     [[nodiscard]] bool parse_incoming_packet(const ArenaSlot<IncomingCell>& packet);
 
 
-    void handle_control_from_relay(const ArenaSlot<IncomingCell>& packet) const;
+    void handle_control_from_relay(const ArenaSlot<IncomingCell>& packet);
 
 
     void insert_into_rob(ArenaSlot<IncomingCell> packet);
@@ -209,4 +214,17 @@ private:
 
 
     void simulate_system_traffic();
+
+
+    asio::awaitable<void> handle_exit_shutdown(ExitShutdownSyn syn, txn_id_t txn_id);
+
+
+    asio::awaitable<void> send_exit_shutdown_ack(std::shared_ptr<CircuitInfo> circuit_info, txn_id_t txn_id) const;
+
+
+    static std::vector<uint8_t> make_exit_shutdown_ack_packet(session_id_t sid, circuit_id_t cid, txn_id_t txn_id);
+
+
+    static std::vector<uint8_t> make_relay_change_exit_req_packet(session_id_t sid, txn_id_t txn_id, circuit_id_t cid,
+                                                                  uint32_t new_exit_ip, uint16_t new_exit_port);
 };

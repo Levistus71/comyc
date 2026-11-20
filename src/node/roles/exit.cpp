@@ -1,5 +1,6 @@
 #include <src/node/roles/exit.hpp>
 #include "src/encryption/encryption.hpp"
+#include "src/node/node.hpp"
 
 #include <quill/LogMacros.h>
 
@@ -7,6 +8,7 @@
 Exit::Exit(asio::io_context& ioc,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
            std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
+           const std::shared_ptr<RelaysInfoGlb>& relays_info_glb,
            const std::shared_ptr<network_stats::StatsReporter>& stats_reporter):
     ioc_(ioc),
     udp_socketv4_(std::move(udp_socketv4)),
@@ -16,7 +18,8 @@ Exit::Exit(asio::io_context& ioc,
     utun_strand_(asio::make_strand(ioc)),
     utun_stream_(utun_strand_),
     utun_("exit_logger"),
-    stats_reporter_(stats_reporter){
+    stats_reporter_(stats_reporter),
+    glb_(relays_info_glb){
     logger_ = quill::Frontend::get_logger("exit_logger");
 }
 
@@ -54,7 +57,63 @@ Exit::~Exit(){
 }
 
 
-void Exit::stop(){}
+void Exit::stop(){
+    if(bool expected = true; running_.compare_exchange_strong(expected, false) == false){
+        LOG_ERROR(logger_, "Called start() more than once.");
+        return;
+    }
+
+    std::shared_ptr<std::unordered_map<circuit_id_t, std::shared_ptr<CircuitInfo>>> umap_wrap = cid_ci_umap_.get_raw_map();
+    for(auto& pair: *umap_wrap){
+        asio::co_spawn(ioc_,
+                       [me=shared_from_this(), pair]() -> asio::awaitable<void>{
+                           co_await me->send_shutdown_syn(pair.first, pair.second);
+                       },
+                       asio::detached);
+    }
+}
+
+
+asio::awaitable<void> Exit::send_shutdown_syn(circuit_id_t circuit_id, std::shared_ptr<CircuitInfo> circuit_info){
+    txn_id_t txn_id = RandomGen::gen_txn_id();
+
+    std::vector<uint8_t> shutdown_syn_packet = make_shutdown_syn_packet(circuit_id, txn_id);
+
+    // encrypt using sh_ce (routing_flag + transit_hdr are unencrypted)
+    {
+        auto hdr_size = sizeof(RoutingFlag) + TRANSIT_HDR_SZ;
+        crypto::encrypt_layer_ce(circuit_info->sh_ce, shutdown_syn_packet.data() + hdr_size, shutdown_syn_packet.size() - hdr_size);
+    }
+
+    for(const auto& relay: circuit_info->relays){
+        const auto ep = relay->endpoint;
+        auto res = co_await Node::control_send_and_wait_udp(udp_socketv4_, std::vector<uint8_t>{}, ep,
+                                                            txn_id, glb_, logger_, stats_reporter_);
+
+        if(std::holds_alternative<std::vector<uint8_t>>(res)){
+            auto response_vec = std::get<std::vector<uint8_t>>(std::move(res));
+            // process_incoming_packet already parsed packet
+            if(response_vec.size() < sizeof(ExitShutdownAck)){
+                LOG_CRITICAL(logger_, "Node::resume_control_operation() called improperly.");
+                continue;
+            }
+
+            ExitShutdownAck response{};
+            std::memcpy(&response, response_vec.data(), sizeof(response));
+            if(response.cid != circuit_id){
+                LOG_WARNING(logger_, "Unexpected cid received from client for shutdown ack: {}", response.cid);
+                continue;
+            }
+
+            co_return;
+        }
+
+        LOG_WARNING(logger_, "Client did not reply for ack using relay : {}", relay->to_string());
+    }
+
+    LOG_WARNING(logger_, "RIP client, cid: {}", circuit_id);
+    co_return;
+}
 
 
 void Exit::start_listening_utun(){
@@ -262,7 +321,23 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
     const size_t body_len = packet->bytes_received - min_sz;
 
     switch(chdr.msg_type){
+        case ControlMsgType::EXIT_SHUTDOWN_ACK: {
+            if(running_.load(std::memory_order_acquire)){
+                LOG_WARNING(logger_, "Shutdown ack received while running.");
+                return;
+            }
+            // fixme, uncessary vector, spaghetti:
+            auto ack = std::vector<uint8_t>(body_ptr, body_ptr + body_len);
+            Node::resume_control_operation(chdr.txn_id, ack, glb_); // resumes send_shutdown_syn, which exits
+            return;
+        }
         case ControlMsgType::EXIT_HANDSHAKE_REQ: {
+            if(!running_.load(std::memory_order_acquire)){
+                LOG_INFO(logger_, "Handshake while exiting, staying quiet.");
+                // stay quiet, don't respond
+                return;
+            }
+
             if(body_len < sizeof(ExitHandshakeReq)){
                 LOG_WARNING(logger_, "ExitCircuitCreateReq payload too small.");
                 stats_reporter_->stats.on_malformed_packet();
@@ -306,12 +381,18 @@ void Exit::handle_control_from_relay(ArenaSlot<IncomingCell> packet, const asio:
                 ci = std::make_shared<CircuitInfo>(CircuitInfo{
                     .circuit_id       = cid,
                     .sequence_id_ptr  = std::make_shared<std::atomic<sequence_id_t>>(our_initial_seq),
+                    .mutating         = std::make_shared<std::atomic_bool>(false),
                     .relays           = std::move(relays),
                     .sh_ce            = sh_ce,
                     .reorder_buffer   = std::make_shared<ReorderBuffer<ArenaSlot<IncomingCell>, sequence_id_t>>(ioc_, Settings::REORDER_BUFFER_SIZE, client_initial_seq, logger_),
                     /* not used by exit, compiler warns */
                     .nt               = NetworkTuple::create_exit_nt(asio::ip::address{}, asio::ip::address{}, 0, 0),
-                    .activity_counter = {}
+                    .activity_counter = {},
+                    .exit_ep          = asio::ip::udp::endpoint{},
+                    .default_circuit  = false,
+                    .src_port         = 0,
+                    .dest_ip          = 0,
+                    .dest_port        = 0
                 });
 
                 cid_ci_umap_.put(cid, ci);
@@ -458,7 +539,7 @@ circuit_id is at the start
 
     if(packet->payload_bytes > 0){
         const uint8_t ip_ver = (packet->payload[packet->start_offset] >> 4) & 0x0F;
-        packet->ip_version_macos = htonl((ip_ver == 6) ? AF_INET6 : AF_INET);   // those who know :skull:, FUCK ME MAN
+        packet->ip_version_macos = htonl((ip_ver == 6) ? AF_INET6 : AF_INET); // those who know :skull:, FUCK ME MAN
         // htonl fucking took me 2 hours to fix, was looking at utuns.
     }
     else{
@@ -536,5 +617,38 @@ void Exit::do_write_utun(sequence_id_t seq_id){
         me->utun_write_queue_.pop_front();
         me->do_write_utun(seq_id);
     };
-    utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_,lmb));
+    utun_stream_.async_write_some(bufs, asio::bind_executor(utun_strand_, lmb));
+}
+
+
+std::vector<uint8_t> Exit::make_shutdown_syn_packet(circuit_id_t circuit_id, txn_id_t txn_id){
+    std::vector<uint8_t> resp_buf(sizeof(RoutingFlag) + TRANSIT_HDR_SZ + CONTROL_HDR_SZ + sizeof(ExitShutdownSyn));
+    size_t offset = 0;
+
+    auto route_flag = static_cast<std::underlying_type_t<RoutingFlag>>(RoutingFlag::EXIT_TO_RELAY);
+    std::memcpy(resp_buf.data() + offset, &route_flag, sizeof(route_flag));
+    offset += sizeof(route_flag);
+
+    TransitHeader resp_thdr{};
+    resp_thdr.circuit_id = circuit_id;
+    resp_thdr.frame_len = static_cast<uint16_t>(CONTROL_HDR_SZ + sizeof(ExitShutdownSyn));
+    resp_thdr.flags = static_cast<uint16_t>(ThdrFlag::CONTROL);
+    resp_thdr.payload_tier = PayloadTier::TIER_64;
+    std::memcpy(resp_buf.data() + offset, &resp_thdr, TRANSIT_HDR_SZ);
+    offset += TRANSIT_HDR_SZ;
+
+    ControlHeader resp_chdr{};
+    resp_chdr.msg_type = ControlMsgType::EXIT_SHUTDOWN_SYN;
+    resp_chdr.flags = 0;
+    resp_chdr.payload_len = static_cast<uint16_t>(sizeof(ExitShutdownSyn));
+    resp_chdr.txn_id = txn_id;
+    std::memcpy(resp_buf.data() + offset, &resp_chdr, CONTROL_HDR_SZ);
+    offset += CONTROL_HDR_SZ;
+
+    ExitShutdownSyn res{
+        .cid = circuit_id
+    };
+    std::memcpy(resp_buf.data() + offset, &res, sizeof(ExitShutdownSyn));
+
+    return resp_buf;
 }

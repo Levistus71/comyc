@@ -65,6 +65,7 @@ public:
     Exit(asio::io_context& ioc,
          std::shared_ptr<asio::ip::udp::socket> udp_socketv4,
          std::shared_ptr<asio::ip::udp::socket> udp_socketv6,
+         const std::shared_ptr<RelaysInfoGlb>& relays_info_glb,
          const std::shared_ptr<network_stats::StatsReporter>& stats_reporter);
 
 
@@ -113,6 +114,9 @@ private:
     bool utun_writing_{false};
     std::atomic<size_t> relay_rr_counter_{0};
 
+    // shutdown
+    std::shared_ptr<RelaysInfoGlb> glb_;
+
 
     void start_listening_utun();
 
@@ -143,6 +147,12 @@ private:
                                                                 sequence_id_t seq_id,
                                                                 uint64_t reorder_buffer_size,
                                                                 const std::array<uint8_t, 32>& pubkey);
+
+
+    asio::awaitable<void> send_shutdown_syn(circuit_id_t circuit_id, std::shared_ptr<CircuitInfo> circuit_info);
+
+
+    std::vector<uint8_t> make_shutdown_syn_packet(circuit_id_t circuit_id, txn_id_t txn_id);
 
 
     void insert_into_rob(ArenaSlot<IncomingCell> packet);

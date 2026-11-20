@@ -70,6 +70,12 @@ public:
 
     void erase(const Key& key);
 
+
+    std::shared_ptr<MapType> get_raw_map();
+
+
+    size_t replace_value(const Val& old_val, const Val& new_val);
+
 private:
     std::atomic<std::shared_ptr<MapType>> umap_;
     std::mutex write_lock_;
@@ -228,6 +234,46 @@ void RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::erase(const Key& key){
     auto new_map = std::make_shared<MapType>(*current);
     new_map->erase(key);
     umap_.store(new_map, std::memory_order_release);
+}
+
+
+template<class Key, class Val, class Hash, class KeyEqual, class Allocator>
+std::shared_ptr<std::unordered_map<Key, Val, Hash, KeyEqual, Allocator>> RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::get_raw_map(){
+    std::lock_guard<std::mutex> lock(write_lock_);
+    auto umap = umap_.load(std::memory_order_relaxed);
+    return umap;
+}
+
+
+template<class Key, class Val, class Hash, class KeyEqual, class Allocator>
+size_t RCU_UMap<Key, Val, Hash, KeyEqual, Allocator>::replace_value(const Val& old_val, const Val& new_val){
+    std::lock_guard<std::mutex> lock(write_lock_);
+
+    auto current = umap_.load(std::memory_order_relaxed);
+    if(!current){
+        return 0;
+    }
+
+    // if matches==0 return immediately
+    size_t matches = 0;
+    for(const auto& [k, v]: *current){
+        if(v == old_val){
+            ++matches;
+        }
+    }
+    if(matches == 0){
+        return 0;
+    }
+
+    auto new_map = std::make_shared<MapType>(*current);
+    for(auto& [k, v]: *new_map){
+        if(v == old_val){
+            v = new_val;
+        }
+    }
+
+    umap_.store(new_map, std::memory_order_release);
+    return matches;
 }
 
 
@@ -533,9 +579,11 @@ class Client;
 
 
 struct CircuitInfo{
+    // fixme: primary relay is now just the first relay. write functions to access it (make_new_circuit) and choose_relay()
+    // and exit handling
     circuit_id_t circuit_id;
     std::shared_ptr<std::atomic<sequence_id_t>> sequence_id_ptr;
-
+    std::shared_ptr<std::atomic_bool> mutating;     // true when exit's changing, false otherwise
     std::vector<std::shared_ptr<RelayInfo>> relays; // OPTIMIZE: no vector. use ring buffer (organized by other thread)
 
     std::array<uint8_t, 32> sh_ce{};
@@ -543,6 +591,13 @@ struct CircuitInfo{
     std::optional<NetworkTuple> nt; // nullopt -> default circuit
 
     std::shared_ptr<Statistics<10>> activity_counter;
+
+    asio::ip::udp::endpoint exit_ep;
+
+    bool default_circuit;
+    uint16_t src_port;
+    uint32_t dest_ip;
+    uint32_t dest_port;
 
 
     void touch(const std::shared_ptr<Client>& client_ptr) const;
@@ -611,9 +666,10 @@ public:
     }
 
 
-    static asio::ip::udp::endpoint& choose_exit(std::vector<asio::ip::udp::endpoint> exits){
+    static asio::ip::udp::endpoint choose_exit(std::unordered_set<asio::ip::udp::endpoint> exits){
         std::uniform_int_distribution<std::size_t> dist(0, exits.size() - 1);
-        return exits[dist(gen_)];
+        const auto it = std::next(exits.begin(), dist(gen_));
+        return *it;
     }
 
 
@@ -889,18 +945,18 @@ private:
 
 
         LOG_INFO(logger_,
-         "[STATS] Sessions: {} | "
-         "Received: {:.1f} pps ({:.2f} Mbps), total: {} | "
-         "Sent: {:.1f} pps ({:.2f} Mbps), total: {} | "
-         "Forwarded: {} | "
-         "UTUN: sent: {}, received: {}, total: {} | "
-         "Drop: {} (Crypto: {}, Malformed: {}, UTUN: {})",
-         d.active_circuits,
-         rx_pps, rx_mbps, d.packets_received,
-         tx_pps, tx_mbps, d.packets_sent,
-         d.packets_forwarded,
-         d.utun_packets_sent, d.utun_packets_received, d.utun_packets_received + d.utun_packets_sent,
-         d.packets_dropped, d.crypto_failures, d.malformed_packets, d.utun_drops);
+                 "[STATS] Sessions: {} | "
+                 "Received: {:.1f} pps ({:.2f} Mbps), total: {} | "
+                 "Sent: {:.1f} pps ({:.2f} Mbps), total: {} | "
+                 "Forwarded: {} | "
+                 "UTUN: sent: {}, received: {}, total: {} | "
+                 "Drop: {} (Crypto: {}, Malformed: {}, UTUN: {})",
+                 d.active_circuits,
+                 rx_pps, rx_mbps, d.packets_received,
+                 tx_pps, tx_mbps, d.packets_sent,
+                 d.packets_forwarded,
+                 d.utun_packets_sent, d.utun_packets_received, d.utun_packets_received + d.utun_packets_sent,
+                 d.packets_dropped, d.crypto_failures, d.malformed_packets, d.utun_drops);
     }
 
 
