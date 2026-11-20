@@ -33,7 +33,7 @@ struct CliOptions{
 
     bool demo_mode = false;
     std::string demo_host_ip = "127.0.0.1";
-    uint16_t demo_host_port = 6969;
+    uint16_t demo_host_port = 8008;
 };
 
 
@@ -95,6 +95,9 @@ public:
             << "      --bootstrap-port <PORT>  Bootstrap relay port [default: 6969]\n"
             << "  -e, --exit-ip <IP>           Exit IPv4 address [default: 8.8.8.8]\n"
             << "      --exit-port <PORT>       Exit port [default: 6969]\n"
+            << "  -d, --demo                   Demo mode (sends circuit information for the demo\n"
+            << "      --demo-host-ip           Demo host ip [defualt: 127.0.0.1]\n"
+            << "      --demo-host-port         Demo host port [defualt:8008]\n"
             << "  -t, --threads <NUM>          Worker thread pool size [default: hardware concurrency ("
             << std::max(1u, std::thread::hardware_concurrency()) << ")]\n"
             << "  -l, --log-file <PATH>        Path to output log file [default: logs.txt]\n"
@@ -135,6 +138,9 @@ public:
             if(arg == "-j" || arg=="--hijack-off"){
                 opts.hijack_utun = false;
                 continue;
+            }
+            if(arg == "-d" || arg=="--demo"){
+                opts.demo_mode = true;
             }
 
             // Options taking a value
@@ -261,31 +267,13 @@ public:
                     return std::nullopt;
                 opts.log_file = std::string(*val);
             }
-            else if(key == "--demo"){
-                opts.demo_mode = true;
-            }
-            else if(key == "--demo-host"){
-                opts.demo_mode = true;
+            else if(key == "--demo-host-ip"){
                 auto val = get_value(key);
                 if(!val)
                     return std::nullopt;
-                std::string s(*val);
-                auto colon = s.find(':');
-                if(colon != std::string::npos){
-                    opts.demo_host_ip = s.substr(0, colon);
-                    try{
-                        opts.demo_host_port = static_cast<uint16_t>(std::stoi(s.substr(colon + 1)));
-                    }
-                    catch(...){
-                        std::cerr << "Error: Invalid port in --demo-host '" << s << "'\n";
-                        return std::nullopt;
-                    }
-                }
-                else{
-                    opts.demo_host_ip = s;
-                }
+                opts.demo_host_ip = std::string(*val);
             }
-            else if(key == "--demo-port"){
+            else if(key == "--demo-host-port"){
                 opts.demo_mode = true;
                 auto val = get_value(key);
                 if(!val)

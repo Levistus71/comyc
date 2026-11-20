@@ -19,7 +19,7 @@ interface RawNode {
 interface RawCircuit {
   cid: number;
   client: string;
-  relay: string;
+  relays: string[];
   exit: string;
   dest: string;
 }
@@ -121,27 +121,31 @@ export default function App() {
     };
   }, []);
 
+  const epToNodeId = useMemo(() => {
+    const map = new Map<string, string>();
+    snapshot.nodes.forEach((n) => {
+      map.set(`${n.ip}:${n.port}`, n.id);
+    });
+    return map;
+  }, [snapshot.nodes]);
+
+  const isNodeInCircuit = useCallback(
+    (nodeId: string, c: RawCircuit) => {
+      if (c.client === nodeId) return true;
+      if (epToNodeId.get(c.exit) === nodeId) return true;
+      return (c.relays || []).some((rEp) => epToNodeId.get(rEp) === nodeId);
+    },
+    [epToNodeId]
+  );
+
   const activeCircuits = useMemo(() => {
     if (!selectedNodeId) return [];
-    return snapshot.circuits.filter((c) => {
-      const targetRelay = snapshot.nodes.find((n) => `${n.ip}:${n.port}` === c.relay);
-      const targetExit = snapshot.nodes.find((n) => `${n.ip}:${n.port}` === c.exit);
-      return (
-        c.client === selectedNodeId ||
-        (targetRelay && targetRelay.id === selectedNodeId) ||
-        (targetExit && targetExit.id === selectedNodeId)
-      );
-    });
-  }, [snapshot.circuits, snapshot.nodes, selectedNodeId]);
+    return snapshot.circuits.filter((c) => isNodeInCircuit(selectedNodeId, c));
+  }, [snapshot.circuits, selectedNodeId, isNodeInCircuit]);
 
   useEffect(() => {
     const rawNodes = snapshot.nodes;
     const rawCircuits = snapshot.circuits;
-
-    const epToNodeId = new Map<string, string>();
-    rawNodes.forEach((n) => {
-      epToNodeId.set(`${n.ip}:${n.port}`, n.id);
-    });
 
     const flowNodes: Node<CustomNodeData>[] = rawNodes.map((n) => {
       let isDimmed = false;
@@ -150,19 +154,11 @@ export default function App() {
       if (selectedNodeId) {
         const isRelated =
           n.id === selectedNodeId ||
-          activeCircuits.some((c) => {
-            const rId = epToNodeId.get(c.relay);
-            const eId = epToNodeId.get(c.exit);
-            return c.client === n.id || rId === n.id || eId === n.id;
-          });
+          activeCircuits.some((c) => isNodeInCircuit(n.id, c));
         isDimmed = !isRelated;
       }
 
-      const cktCount = rawCircuits.filter((c) => {
-        const rId = epToNodeId.get(c.relay);
-        const eId = epToNodeId.get(c.exit);
-        return c.client === n.id || rId === n.id || eId === n.id;
-      }).length;
+      const cktCount = rawCircuits.filter((c) => isNodeInCircuit(n.id, c)).length;
 
       return {
         id: n.id,
@@ -182,37 +178,34 @@ export default function App() {
 
     const flowEdges: Edge[] = [];
     rawCircuits.forEach((c) => {
-      const relayNodeId = epToNodeId.get(c.relay);
+      const relayNodeIds = (c.relays || [])
+        .map((rEp) => epToNodeId.get(rEp))
+        .filter((id): id is string => Boolean(id));
       const exitNodeId = epToNodeId.get(c.exit);
 
       const isCircuitActive =
-        !selectedNodeId ||
-        c.client === selectedNodeId ||
-        relayNodeId === selectedNodeId ||
-        exitNodeId === selectedNodeId;
+        !selectedNodeId || isNodeInCircuit(selectedNodeId, c);
 
-      // Hop 1: Client -> Relay (solid muted blue)
-      if (relayNodeId) {
-        flowEdges.push({
-          id: `edge-${c.cid}-cr`,
-          source: c.client,
-          target: relayNodeId,
-          style: {
-            stroke: isCircuitActive ? '#60a5fa' : '#2e2e2e',
-            strokeWidth: isCircuitActive ? 1.5 : 1,
-            opacity: isCircuitActive ? 0.85 : 0.25,
-          },
-        });
+      // Build ordered hop chain: [client, ...relays, exit]
+      const hopNodeIds = [c.client, ...relayNodeIds];
+      if (exitNodeId) {
+        hopNodeIds.push(exitNodeId);
       }
 
-      // Hop 2: Relay -> Exit (solid muted emerald)
-      if (relayNodeId && exitNodeId) {
+      for (let idx = 0; idx < hopNodeIds.length - 1; idx++) {
+        const sourceId = hopNodeIds[idx];
+        const targetId = hopNodeIds[idx + 1];
+        const isExitHop = Boolean(exitNodeId) && idx === hopNodeIds.length - 2;
+
+        // First/relay hops: muted blue (#60a5fa), final hop into exit: muted emerald (#34d399)
+        const activeColor = isExitHop ? '#34d399' : '#60a5fa';
+
         flowEdges.push({
-          id: `edge-${c.cid}-re`,
-          source: relayNodeId,
-          target: exitNodeId,
+          id: `edge-${c.cid}-hop-${idx}`,
+          source: sourceId,
+          target: targetId,
           style: {
-            stroke: isCircuitActive ? '#34d399' : '#2e2e2e',
+            stroke: isCircuitActive ? activeColor : '#2e2e2e',
             strokeWidth: isCircuitActive ? 1.5 : 1,
             opacity: isCircuitActive ? 0.85 : 0.25,
           },
@@ -223,7 +216,7 @@ export default function App() {
     const layouted = getLayoutedElements(flowNodes, flowEdges);
     setNodes(layouted.nodes);
     setEdges(layouted.edges);
-  }, [snapshot, selectedNodeId, activeCircuits, setNodes, setEdges]);
+  }, [snapshot, selectedNodeId, activeCircuits, epToNodeId, isNodeInCircuit, setNodes, setEdges]);
 
   const onNodeClick = useCallback((_: any, node: Node) => {
     setSelectedNodeId((prev) => (prev === node.id ? null : node.id));
@@ -288,25 +281,28 @@ export default function App() {
                 No active circuits routed through this node.
               </div>
             ) : (
-              activeCircuits.map((ckt) => (
-                <div
-                  key={ckt.cid}
-                  className="bg-[#121212] border border-[#2e2e2e] p-2.5 text-xs space-y-1"
-                >
-                  <div className="flex items-center justify-between text-[#d4d4d4] font-medium">
-                    <span>Circuit #{ckt.cid}</span>
-                    <span className="text-[11px] text-[#a3a3a3]">Established</span>
-                  </div>
-                  <div className="text-[#a3a3a3] font-mono text-[11px]">
-                    {ckt.client} &rarr; {ckt.relay} &rarr; {ckt.exit}
-                  </div>
-                  {ckt.dest && (
-                    <div className="text-[11px] text-[#737373] font-mono truncate">
-                      Dest: {ckt.dest}
+              activeCircuits.map((ckt) => {
+                const pathHops = [ckt.client, ...(ckt.relays || []), ckt.exit].filter(Boolean);
+                return (
+                  <div
+                    key={ckt.cid}
+                    className="bg-[#121212] border border-[#2e2e2e] p-2.5 text-xs space-y-1"
+                  >
+                    <div className="flex items-center justify-between text-[#d4d4d4] font-medium">
+                      <span>Circuit #{ckt.cid}</span>
+                      <span className="text-[11px] text-[#a3a3a3]">Established</span>
                     </div>
-                  )}
-                </div>
-              ))
+                    <div className="text-[#a3a3a3] font-mono text-[11px] break-all">
+                      {pathHops.join(' \u2192 ')}
+                    </div>
+                    {ckt.dest && (
+                      <div className="text-[11px] text-[#737373] font-mono truncate">
+                        Dest: {ckt.dest}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
             )}
           </div>
         </aside>

@@ -128,6 +128,19 @@ void Client::update_relays(){
                 LOG_INFO(logger_, "Added exit {} to utun routes.", ep.address().to_string());
             }
         }
+        // add demo route
+        if(telemetry::DemoReporter::instance().is_enabled()){
+            LOG_INFO(logger_, "Demo enabled, adding demo endpoint to routes.");
+            if(!utun_.add_del_route(true, telemetry::DemoReporter::instance().get_demo_addr(), prefix_v4)){
+                LOG_ERROR(logger_, "Failed to add demo ip {} to utun routes, either local endpoint or "
+                          "was already added.",
+                          telemetry::DemoReporter::instance().get_demo_addr().to_string());
+            }
+            else{
+                LOG_INFO(logger_, "Added demo ip {} to utun routes.",
+                         telemetry::DemoReporter::instance().get_demo_addr().to_string());
+            }
+        }
     }
 
     if(!co_await make_new_circuit(std::nullopt)){
@@ -654,10 +667,13 @@ asio::awaitable<bool> Client::make_new_circuit(std::optional<NetworkTuple> nt){
     }
 
     if(telemetry::DemoReporter::instance().is_enabled()){
-        std::string relay_str = selected_relays.empty() ? "" : (selected_relays[0]->endpoint.address().to_string() + ":" + std::to_string(selected_relays[0]->endpoint.port()));
+        std::vector<std::string> relays_str;
+        for(auto& relay: selected_relays){
+            relays_str.push_back(relay->to_string());
+        }
         std::string exit_str = exit_ep.address().to_string() + ":" + std::to_string(exit_ep.port());
         std::string dest_str = nt.has_value() ? nt->to_string() : "default";
-        telemetry::DemoReporter::instance().record_circuit(assigned_cid, relay_str, exit_str, dest_str);
+        telemetry::DemoReporter::instance().update_circuit(assigned_cid, relays_str, exit_str, dest_str);
     }
 
     // update nt_ci_umap_. new packets should use the new ci from now

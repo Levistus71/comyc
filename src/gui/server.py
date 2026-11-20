@@ -79,7 +79,7 @@ class TopologyState:
                 circuits_list.append({
                     "cid": c.get("cid"),
                     "client": n["node_id"],
-                    "relay": c.get("relay"),
+                    "relays": c.get("relays", []),
                     "exit": c.get("exit"),
                     "dest": c.get("dest", "")
                 })
@@ -283,19 +283,21 @@ async def mock_generator(state: TopologyState, num_clients=3, num_relays=4, num_
         # Update clients with random active circuits
         for i in range(num_clients):
             cid_counter += 1
-            r = random.choice(relays)
+            # Pick 1 to 2 random relays for the path
+            hop_count = random.randint(1, min(2, len(relays)))
+            r_path = random.sample(relays, hop_count)
             e = random.choice(exits)
             dest = f"142.250.190.{random.randint(10, 200)}:443"
             client_id = f"client-{i+1}"
             client_ip = f"10.0.0.{100+i}"
 
             circuits = [
-                {"cid": cid_counter, "relay": r, "exit": e, "dest": dest}
+                {"cid": cid_counter, "relays": r_path, "exit": e, "dest": dest}
             ]
             if random.random() > 0.5:
                 circuits.append({
                     "cid": cid_counter + 50,
-                    "relay": random.choice(relays),
+                    "relays": random.sample(relays, random.randint(1, min(2, len(relays)))),
                     "exit": random.choice(exits),
                     "dest": "default (vpn)"
                 })
@@ -316,7 +318,7 @@ async def pruner_task(state: TopologyState):
 
 async def main():
     parser = argparse.ArgumentParser(description="COMYC Telemetry & Dashboard Server")
-    parser.add_argument("--udp-port", type=int, default=6969, help="UDP telemetry port (default: 6969)")
+    parser.add_argument("--udp-port", type=int, default=8008, help="UDP telemetry port (default: 8008)")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP dashboard port (default: 8080)")
     parser.add_argument("--ttl", type=float, default=6.0, help="Node heartbeat TTL in seconds (default: 6.0)")
     parser.add_argument("--mock", action="store_true", help="Run with simulated mock nodes and rotating circuits")

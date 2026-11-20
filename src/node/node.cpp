@@ -154,8 +154,13 @@ Node::Node(asio::io_context& ioc, std::shared_ptr<cli::CliOptions> options):
     }
 
     if(options->demo_mode){
-        telemetry::DemoReporter::instance().init(ioc_, options);
-        LOG_INFO(logger_, "Demo reporter initialized towards {}:{}", options->demo_host_ip, options->demo_host_port);
+        if(telemetry::DemoReporter::instance().init(ioc_, udp_socketv4_, options, logger_)){
+            LOG_INFO(logger_, "Demo reporter initialized towards {}:{}", options->demo_host_ip, options->demo_host_port);
+        }
+        else{
+            LOG_ERROR(logger_, "Demo reporter failed to start.");
+            co_return false;
+        }
     }
 
     co_return true;
